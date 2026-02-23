@@ -143,6 +143,13 @@ export function computeTrailingStop(price: number, high52w: number, trailPct: nu
   return { trailPrice, distance, triggered };
 }
 
+export function computeTakeProfit(price: number, targetPrice: number | null) {
+  if (!targetPrice || targetPrice <= 0) return { targetPrice: null, distance: 0, triggered: false };
+  const distance = +(((targetPrice - price) / price) * 100).toFixed(1);
+  const triggered = price >= targetPrice;
+  return { targetPrice, distance, triggered };
+}
+
 // ─── Sector color map ───
 export const SECTOR_COLORS: Record<string, string> = {
   // US sectors (Yahoo Finance categories)

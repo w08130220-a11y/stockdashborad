@@ -19,7 +19,7 @@ export interface PlanLimits {
   maxHoldings: number;        // 持股上限
   maxWatchlist: number;       // 觀察清單上限
   maxPriceAlerts: number;     // 價格警報上限
-  trailingStop: boolean;      // 移動停利功能
+  trailingStop: boolean;      // 停損停利功能
   excelImport: boolean;       // Excel/CSV 匯入
   multiCurrency: boolean;     // 多幣別（台美股）
   realtimeRefresh: boolean;   // 即時刷新（vs 每日一次）

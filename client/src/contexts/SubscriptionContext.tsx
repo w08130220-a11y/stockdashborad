@@ -210,7 +210,7 @@ export function useFeatureGate(feature: keyof PlanLimits) {
  *
  * 用法:
  *   const { allowed, remaining, gate } = useLimitGate("maxHoldings", holdings.length);
- *   const handleAdd = () => { if (!gate()) return; /* proceed */ };
+ *   const handleAdd = () => { if (!gate()) return; // proceed };
  */
 export function useLimitGate(
   feature: "maxHoldings" | "maxWatchlist" | "maxPriceAlerts",

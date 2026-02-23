@@ -9,7 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Sparkline } from "@/components/Sparkline";
 import {
   fmt, fmtCompact, pct, pctAbs,
-  computeSignal, computeTrailingStop,
+  computeSignal, computeTrailingStop, computeTakeProfit,
   volCategoryColor, volCategoryLabel, signalColor, signalBg,
   SECTOR_COLORS, detectMarket,
   type EnrichedHolding, type StockQuote, type SignalType, type SignalReason,
@@ -22,7 +22,7 @@ import { toast } from "sonner";
 import {
   Sun, Moon, TrendingUp, TrendingDown, AlertTriangle, Plus, Trash2,
   RefreshCw, Upload, DollarSign, Activity, BarChart2, Eye, EyeOff, Bell,
-  ChevronUp, ChevronDown, Loader2, Edit2, Check, X, Globe,
+  ChevronUp, ChevronDown, Loader2, Edit2, Check, X, Globe, Shield,
 } from "lucide-react";
 
 // ─── Types ───
@@ -330,10 +330,16 @@ export default function Home() {
     });
   }, [watchlistDb, watchStockData]);
 
-  // ─── Trailing stop map ───
+  // ─── Trailing stop + take profit map ───
   const trailingPctMap = useMemo(() => {
     const map: Record<string, number> = {};
     (trailingStopsDb || []).forEach((t) => { map[t.symbol] = t.trailPct; });
+    return map;
+  }, [trailingStopsDb]);
+
+  const takeProfitMap = useMemo(() => {
+    const map: Record<string, number | null> = {};
+    (trailingStopsDb || []).forEach((t) => { map[t.symbol] = t.takeProfitPrice ?? null; });
     return map;
   }, [trailingStopsDb]);
 
@@ -480,7 +486,8 @@ export default function Home() {
         {activeTab === 1 && (
           <TrailingStopTab
             holdings={enrichedHoldings} trailingPctMap={trailingPctMap}
-            onSetTrailing={(symbol, pct) => setTrailingMut.mutate({ symbol, trailPct: pct })}
+            takeProfitMap={takeProfitMap}
+            onSetTrailing={(symbol, pct, tp) => setTrailingMut.mutate({ symbol, trailPct: pct, takeProfitPrice: tp })}
             t={t} locale={locale}
           />
         )}
@@ -889,39 +896,61 @@ function OverviewTab({
 
 
 // ═══════════════════════════════════════════════════════
-// ─── TAB 2: Trailing Stop ───
+// ─── TAB 2: Stop Loss & Take Profit ───
 // ═══════════════════════════════════════════════════════
 function TrailingStopTab({
-  holdings, trailingPctMap, onSetTrailing, t, locale,
+  holdings, trailingPctMap, takeProfitMap, onSetTrailing, t, locale,
 }: {
   holdings: EnrichedHolding[];
   trailingPctMap: Record<string, number>;
-  onSetTrailing: (symbol: string, pct: number) => void;
+  takeProfitMap: Record<string, number | null>;
+  onSetTrailing: (symbol: string, pct: number, tp?: number | null) => void;
   t: (k: string) => string; locale: string;
 }) {
   const [localPcts, setLocalPcts] = useState<Record<string, number>>({});
+  const [localTargets, setLocalTargets] = useState<Record<string, string>>({});
+  const [editingTarget, setEditingTarget] = useState<string | null>(null);
   const [marketFilter, setMarketFilter] = useState<MarketFilter>("ALL");
 
   const getPct = (symbol: string) => localPcts[symbol] ?? trailingPctMap[symbol] ?? 15;
+  const getTarget = (symbol: string): number | null => {
+    if (localTargets[symbol] !== undefined) {
+      const v = parseFloat(localTargets[symbol]);
+      return isNaN(v) || v <= 0 ? null : v;
+    }
+    return takeProfitMap[symbol] ?? null;
+  };
 
   const filteredHoldings = holdings.filter((h) => marketFilter === "ALL" || h.market === marketFilter);
 
-  const triggered = filteredHoldings.filter((h) => {
+  const stopTriggered = filteredHoldings.filter((h) => {
     const p = getPct(h.symbol);
     return computeTrailingStop(h.price, h.high52w, p).triggered;
   });
 
-  const currSym = (h: EnrichedHolding) => h.currency === "TWD" ? "NT$" : "$";
+  const tpTriggered = filteredHoldings.filter((h) => {
+    const tp = getTarget(h.symbol);
+    return tp ? computeTakeProfit(h.price, tp).triggered : false;
+  });
+
   const fmtP = (h: EnrichedHolding, n: number, digits = 2) => h.currency === "TWD" ? `NT$${n.toLocaleString("zh-TW", { minimumFractionDigits: 0, maximumFractionDigits: 0 })}` : `$${fmt(n, digits)}`;
+
+  const saveTarget = (symbol: string) => {
+    const tp = getTarget(symbol);
+    const pct = getPct(symbol);
+    onSetTrailing(symbol, pct, tp);
+    setEditingTarget(null);
+  };
 
   return (
     <div className="flex flex-col gap-6">
       {/* Summary */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+      <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
         <StatCard label={locale === "zh-TW" ? "監控持股" : "Monitored"} value={`${filteredHoldings.length} ${locale === "zh-TW" ? "檔" : ""}`} icon={<Activity size={13} />} />
-        <StatCard label={t("ts.triggered")} value={`${triggered.length} ${locale === "zh-TW" ? "檔" : ""}`} color={triggered.length > 0 ? "var(--color-stock-red)" : "var(--color-stock-green)"} icon={<AlertTriangle size={13} />} />
+        <StatCard label={t("ts.triggered")} value={`${stopTriggered.length} ${locale === "zh-TW" ? "檔" : ""}`} color={stopTriggered.length > 0 ? "var(--color-stock-red)" : "var(--color-stock-green)"} icon={<AlertTriangle size={13} />} />
+        <StatCard label={t("ts.tpTriggered")} value={`${tpTriggered.length} ${locale === "zh-TW" ? "檔" : ""}`} color={tpTriggered.length > 0 ? "var(--color-stock-green)" : undefined} icon={<TrendingUp size={13} />} />
         <StatCard label={locale === "zh-TW" ? "平均回撤設定" : "Avg Drawdown"} value={`${(Object.values({ ...trailingPctMap, ...localPcts }).reduce((s, v) => s + v, 0) / Math.max(1, Object.values({ ...trailingPctMap, ...localPcts }).length)).toFixed(1)}%`} icon={<TrendingDown size={13} />} />
-        <StatCard label={locale === "zh-TW" ? "安全持股" : "Safe Holdings"} value={`${filteredHoldings.length - triggered.length} ${locale === "zh-TW" ? "檔" : ""}`} color="var(--color-stock-green)" icon={<TrendingUp size={13} />} />
+        <StatCard label={locale === "zh-TW" ? "安全持股" : "Safe Holdings"} value={`${filteredHoldings.length - stopTriggered.length} ${locale === "zh-TW" ? "檔" : ""}`} color="var(--color-stock-green)" icon={<Shield size={13} />} />
       </div>
 
       {/* Market filter */}
@@ -929,15 +958,31 @@ function TrailingStopTab({
         <MarketTabs value={marketFilter} onChange={setMarketFilter} t={t} />
       </div>
 
-      {triggered.length > 0 && (
+      {/* Stop Loss Alert */}
+      {stopTriggered.length > 0 && (
         <div className="rounded-xl border-2 p-4 flex items-start gap-3" style={{ borderColor: "var(--color-stock-red)", background: "var(--color-stock-red-bg)" }}>
           <AlertTriangle size={18} style={{ color: "var(--color-stock-red)", flexShrink: 0, marginTop: 1 }} />
           <div>
             <div className="text-sm font-semibold" style={{ color: "var(--color-stock-red)" }}>
-              {locale === "zh-TW" ? "⚠️ 停利警報" : "⚠️ Stop Alert"}
+              {locale === "zh-TW" ? "⚠️ 停損警報" : "⚠️ Stop Loss Alert"}
             </div>
             <div className="text-xs text-muted-foreground mt-0.5">
-              {triggered.map((h) => h.symbol).join("、")} {locale === "zh-TW" ? "已觸發移動停利線，建議評估是否執行止盈止損。" : "triggered trailing stop. Consider taking action."}
+              {stopTriggered.map((h) => h.symbol).join("、")} {locale === "zh-TW" ? "已跌破追蹤停損線，建議評估是否執行停損。" : "broke trailing stop line. Consider taking action."}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Take Profit Alert */}
+      {tpTriggered.length > 0 && (
+        <div className="rounded-xl border-2 p-4 flex items-start gap-3" style={{ borderColor: "var(--color-stock-green)", background: "var(--color-stock-green-bg, #e6f9e8)" }}>
+          <TrendingUp size={18} style={{ color: "var(--color-stock-green)", flexShrink: 0, marginTop: 1 }} />
+          <div>
+            <div className="text-sm font-semibold" style={{ color: "var(--color-stock-green)" }}>
+              {locale === "zh-TW" ? "🎯 停利達標" : "🎯 Take Profit Reached"}
+            </div>
+            <div className="text-xs text-muted-foreground mt-0.5">
+              {tpTriggered.map((h) => h.symbol).join("、")} {locale === "zh-TW" ? "已達到目標價，建議評估是否獲利了結。" : "reached target price. Consider taking profit."}
             </div>
           </div>
         </div>
@@ -947,13 +992,19 @@ function TrailingStopTab({
       <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4">
         {filteredHoldings.map((h) => {
           const trailPct = getPct(h.symbol);
-          const { trailPrice, distance, triggered: isTriggered } = computeTrailingStop(h.price, h.high52w, trailPct);
+          const targetPrice = getTarget(h.symbol);
+          const { trailPrice, distance, triggered: isStopTriggered } = computeTrailingStop(h.price, h.high52w, trailPct);
+          const { triggered: isTpTriggered, distance: tpDistance } = computeTakeProfit(h.price, targetPrice);
           const barWidth = Math.max(0, Math.min(100, ((h.price - h.low52w) / (h.high52w - h.low52w)) * 100));
           const trailBarPos = Math.max(0, Math.min(100, ((trailPrice - h.low52w) / (h.high52w - h.low52w)) * 100));
 
+          const borderColor = isStopTriggered ? "var(--color-stock-red)" : isTpTriggered ? "var(--color-stock-green)" : "var(--border)";
+          const borderWidth = isStopTriggered || isTpTriggered ? 2 : 1;
+
           return (
             <div key={`${h.id}-${h.symbol}`} className="rounded-xl border bg-card p-4 flex flex-col gap-3 transition-all"
-              style={{ borderColor: isTriggered ? "var(--color-stock-red)" : "var(--border)", borderWidth: isTriggered ? 2 : 1 }}>
+              style={{ borderColor, borderWidth }}>
+              {/* Header */}
               <div className="flex items-start justify-between">
                 <div>
                   <div className="flex items-center gap-2">
@@ -963,26 +1014,73 @@ function TrailingStopTab({
                   </div>
                   <div className="text-xs text-muted-foreground mt-0.5">{h.name}</div>
                 </div>
-                {isTriggered && (
-                  <span className="flex items-center gap-1 text-xs font-bold px-2 py-0.5 rounded-full" style={{ background: "var(--color-stock-red-bg)", color: "var(--color-stock-red)" }}>
-                    <AlertTriangle size={10} /> {locale === "zh-TW" ? "觸發" : "Triggered"}
-                  </span>
-                )}
+                <div className="flex gap-1">
+                  {isStopTriggered && (
+                    <span className="flex items-center gap-1 text-[10px] font-bold px-1.5 py-0.5 rounded-full" style={{ background: "var(--color-stock-red-bg)", color: "var(--color-stock-red)" }}>
+                      <AlertTriangle size={9} /> {locale === "zh-TW" ? "停損" : "Stop"}
+                    </span>
+                  )}
+                  {isTpTriggered && (
+                    <span className="flex items-center gap-1 text-[10px] font-bold px-1.5 py-0.5 rounded-full" style={{ background: "var(--color-stock-green-bg, #e6f9e8)", color: "var(--color-stock-green)" }}>
+                      <TrendingUp size={9} /> {locale === "zh-TW" ? "達標" : "Target"}
+                    </span>
+                  )}
+                </div>
               </div>
 
-              <div className="grid grid-cols-3 gap-2 text-sm">
+              {/* Price + Cost + P&L row */}
+              <div className="grid grid-cols-4 gap-2 text-sm">
                 <div>
                   <div className="text-xs text-muted-foreground">{locale === "zh-TW" ? "現價" : "Price"}</div>
                   <div className="font-bold text-base font-mono">{fmtP(h, h.price)}</div>
                   <div className="text-xs" style={{ color: h.changePct >= 0 ? "var(--color-stock-green)" : "var(--color-stock-red)" }}>{pct(h.changePct)}</div>
                 </div>
                 <div>
+                  <div className="text-xs text-muted-foreground">{t("ts.costBasis")}</div>
+                  <div className="font-semibold font-mono text-sm">{fmtP(h, h.avgCost)}</div>
+                  <div className="text-[10px] text-muted-foreground">{h.shares} {locale === "zh-TW" ? "股" : "sh"}</div>
+                </div>
+                <div>
+                  <div className="text-xs text-muted-foreground">{t("ts.unrealizedPnl")}</div>
+                  <div className="font-semibold font-mono text-sm" style={{ color: h.pnl >= 0 ? "var(--color-stock-green)" : "var(--color-stock-red)" }}>
+                    {h.pnl >= 0 ? "+" : ""}{fmtP(h, Math.abs(h.pnl))}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-xs text-muted-foreground">{t("ts.roi")}</div>
+                  <div className="font-bold font-mono text-sm" style={{ color: h.pnlPct >= 0 ? "var(--color-stock-green)" : "var(--color-stock-red)" }}>
+                    {pct(h.pnlPct)}
+                  </div>
+                </div>
+              </div>
+
+              {/* Stop Loss + Take Profit lines */}
+              <div className="grid grid-cols-3 gap-2 text-sm border-t border-border pt-2">
+                <div>
+                  <div className="text-xs text-muted-foreground">{t("ts.stopLine")}</div>
+                  <div className="font-semibold font-mono" style={{ color: "var(--color-stock-red)" }}>{fmtP(h, trailPrice)}</div>
+                </div>
+                <div>
                   <div className="text-xs text-muted-foreground">{t("ts.high52w")}</div>
                   <div className="font-semibold font-mono">{fmtP(h, h.high52w)}</div>
                 </div>
                 <div>
-                  <div className="text-xs text-muted-foreground">{t("ts.stopLine")}</div>
-                  <div className="font-semibold font-mono" style={{ color: "var(--color-stock-red)" }}>{fmtP(h, trailPrice)}</div>
+                  <div className="text-xs text-muted-foreground">{t("ts.takeProfit")}</div>
+                  {editingTarget === h.symbol ? (
+                    <input autoFocus type="number" step="0.01"
+                      value={localTargets[h.symbol] ?? (targetPrice || "")}
+                      onChange={(e) => setLocalTargets((p) => ({ ...p, [h.symbol]: e.target.value }))}
+                      onKeyDown={(e) => { if (e.key === "Enter") saveTarget(h.symbol); if (e.key === "Escape") setEditingTarget(null); }}
+                      onBlur={() => saveTarget(h.symbol)}
+                      className="w-full px-1.5 py-0.5 rounded border border-primary bg-background text-sm font-mono" />
+                  ) : (
+                    <button onClick={() => setEditingTarget(h.symbol)}
+                      className="flex items-center gap-1 font-semibold font-mono hover:text-primary transition-colors group"
+                      style={{ color: targetPrice ? (isTpTriggered ? "var(--color-stock-green)" : "var(--foreground)") : "var(--muted-foreground)" }}>
+                      {targetPrice ? fmtP(h, targetPrice) : (locale === "zh-TW" ? "點擊設定" : "Set")}
+                      <Edit2 size={9} className="opacity-0 group-hover:opacity-100 text-muted-foreground" />
+                    </button>
+                  )}
                 </div>
               </div>
 
@@ -990,28 +1088,45 @@ function TrailingStopTab({
               <div className="relative h-5">
                 <div className="absolute inset-y-0 left-0 right-0 flex items-center">
                   <div className="w-full h-2 rounded-full bg-muted overflow-visible relative">
-                    <div className="h-full rounded-full transition-all" style={{ width: `${barWidth}%`, background: isTriggered ? "var(--color-stock-red)" : "var(--color-stock-green)" }} />
-                    <div className="absolute top-1/2 -translate-y-1/2 w-0.5 h-4 rounded-full" style={{ left: `${trailBarPos}%`, background: "var(--color-stock-red)" }} />
-                    <div className="absolute top-1/2 -translate-y-1/2 w-3 h-3 rounded-full border-2 border-card shadow" style={{ left: `calc(${barWidth}% - 6px)`, background: isTriggered ? "var(--color-stock-red)" : "var(--color-stock-green)" }} />
+                    <div className="h-full rounded-full transition-all" style={{ width: `${barWidth}%`, background: isStopTriggered ? "var(--color-stock-red)" : "var(--color-stock-green)" }} />
+                    {/* Stop loss marker */}
+                    <div className="absolute top-1/2 -translate-y-1/2 w-0.5 h-4 rounded-full" style={{ left: `${trailBarPos}%`, background: "var(--color-stock-red)" }} title={`${t("ts.stopLine")}: ${fmtP(h, trailPrice)}`} />
+                    {/* Take profit marker */}
+                    {targetPrice && (() => {
+                      const tpPos = Math.max(0, Math.min(100, ((targetPrice - h.low52w) / (h.high52w - h.low52w)) * 100));
+                      return <div className="absolute top-1/2 -translate-y-1/2 w-0.5 h-4 rounded-full" style={{ left: `${tpPos}%`, background: "var(--color-stock-green)" }} title={`${t("ts.takeProfit")}: ${fmtP(h, targetPrice)}`} />;
+                    })()}
+                    {/* Current price dot */}
+                    <div className="absolute top-1/2 -translate-y-1/2 w-3 h-3 rounded-full border-2 border-card shadow" style={{ left: `calc(${barWidth}% - 6px)`, background: isStopTriggered ? "var(--color-stock-red)" : "var(--color-stock-green)" }} />
                   </div>
                 </div>
                 <div className="absolute -bottom-4 left-0 text-[9px] text-muted-foreground">{fmtP(h, h.low52w, 0)}</div>
                 <div className="absolute -bottom-4 right-0 text-[9px] text-muted-foreground">{fmtP(h, h.high52w, 0)}</div>
               </div>
 
-              <div className="mt-2 flex items-center justify-between text-xs">
-                <span className="text-muted-foreground">{t("ts.distance")}</span>
-                <span className="font-semibold" style={{ color: distance > 8 ? "var(--color-stock-green)" : distance > 3 ? "var(--color-stock-yellow)" : "var(--color-stock-red)" }}>
-                  {distance > 0 ? `+${distance}%` : `${distance}%`}
-                </span>
+              {/* Distance to stop + Distance to target */}
+              <div className="mt-2 grid grid-cols-2 gap-2 text-xs">
+                <div className="flex items-center justify-between">
+                  <span className="text-muted-foreground">{t("ts.distance")}</span>
+                  <span className="font-semibold" style={{ color: distance > 8 ? "var(--color-stock-green)" : distance > 3 ? "var(--color-stock-yellow)" : "var(--color-stock-red)" }}>
+                    {distance > 0 ? `+${distance}%` : `${distance}%`}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-muted-foreground">{t("ts.tpDistance")}</span>
+                  <span className="font-semibold" style={{ color: targetPrice ? (isTpTriggered ? "var(--color-stock-green)" : "var(--foreground)") : "var(--muted-foreground)" }}>
+                    {targetPrice ? (tpDistance > 0 ? `${tpDistance}%` : `${locale === "zh-TW" ? "已達標" : "Reached"}`) : (locale === "zh-TW" ? "—" : "—")}
+                  </span>
+                </div>
               </div>
 
+              {/* Drawdown slider */}
               <div className="flex items-center gap-3 text-xs">
                 <span className="text-muted-foreground whitespace-nowrap">{t("ts.drawdown")}</span>
                 <input type="range" min={5} max={30} step={1} value={trailPct}
                   onChange={(e) => setLocalPcts((p) => ({ ...p, [h.symbol]: +e.target.value }))}
-                  onMouseUp={() => onSetTrailing(h.symbol, getPct(h.symbol))}
-                  onTouchEnd={() => onSetTrailing(h.symbol, getPct(h.symbol))}
+                  onMouseUp={() => onSetTrailing(h.symbol, getPct(h.symbol), getTarget(h.symbol))}
+                  onTouchEnd={() => onSetTrailing(h.symbol, getPct(h.symbol), getTarget(h.symbol))}
                   className="flex-1 h-1.5" />
                 <span className="font-bold w-8 text-right text-primary">{trailPct}%</span>
               </div>

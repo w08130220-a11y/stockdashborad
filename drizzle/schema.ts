@@ -80,6 +80,7 @@ export const trailingStops = mysqlTable("trailing_stops", {
   userId: int("userId").notNull(),
   symbol: varchar("symbol", { length: 20 }).notNull(),
   trailPct: decimal("trailPct", { precision: 5, scale: 2 }).notNull().default("15"),
+  takeProfitPrice: decimal("takeProfitPrice", { precision: 18, scale: 4 }),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
 }, (t) => [uniqueIndex("trailing_user_symbol_idx").on(t.userId, t.symbol)]);

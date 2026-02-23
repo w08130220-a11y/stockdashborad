@@ -440,6 +440,7 @@ export const appRouter = router({
       return rows.map((r) => ({
         symbol: r.symbol,
         trailPct: parseFloat(String(r.trailPct)),
+        takeProfitPrice: r.takeProfitPrice ? parseFloat(String(r.takeProfitPrice)) : null,
       }));
     }),
 
@@ -447,12 +448,14 @@ export const appRouter = router({
       .input(z.object({
         symbol: z.string().min(1),
         trailPct: z.number().min(1).max(50),
+        takeProfitPrice: z.number().positive().nullable().optional(),
       }))
       .mutation(async ({ ctx, input }) => {
         await upsertTrailingStop({
           userId: ctx.user.id,
           symbol: normalizeSymbol(input.symbol),
           trailPct: String(input.trailPct),
+          ...(input.takeProfitPrice !== undefined ? { takeProfitPrice: input.takeProfitPrice != null ? String(input.takeProfitPrice) : null } : {}),
         });
         return { success: true };
       }),

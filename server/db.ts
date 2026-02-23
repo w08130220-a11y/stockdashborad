@@ -170,7 +170,12 @@ export async function getTrailingStops(userId: number) {
 export async function upsertTrailingStop(data: InsertTrailingStop) {
   const db = await getDb();
   if (!db) return;
-  await db.insert(trailingStops).values(data).onDuplicateKeyUpdate({ set: { trailPct: data.trailPct } });
+  await db.insert(trailingStops).values(data).onDuplicateKeyUpdate({
+    set: {
+      trailPct: data.trailPct,
+      ...(data.takeProfitPrice !== undefined ? { takeProfitPrice: data.takeProfitPrice } : {}),
+    },
+  });
 }
 
 // ─── Cash Balance ───
