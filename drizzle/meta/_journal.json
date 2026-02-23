@@ -1,0 +1,41 @@
+{
+  "version": "7",
+  "dialect": "mysql",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "5",
+      "when": 1771695858319,
+      "tag": "0000_whole_payback",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "5",
+      "when": 1771696000353,
+      "tag": "0001_keen_marvex",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "5",
+      "when": 1771697645683,
+      "tag": "0002_polite_timeslip",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "5",
+      "when": 1771701385190,
+      "tag": "0003_motionless_pandemic",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "5",
+      "when": 1771740896807,
+      "tag": "0004_foamy_stick",
+      "breakpoints": true
+    }
+  ]
+}
