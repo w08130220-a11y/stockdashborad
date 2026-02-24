@@ -138,7 +138,7 @@ export async function upsertCashFlow(data: InsertCashFlow & { id?: number }) {
   if (!db) return;
   if (data.id) {
     await db.update(cashFlows).set({
-      date: data.date, inflow: data.inflow, outflow: data.outflow, note: data.note,
+      date: data.date, inflow: data.inflow, outflow: data.outflow, category: data.category, note: data.note,
     }).where(and(eq(cashFlows.id, data.id), eq(cashFlows.userId, data.userId)));
   } else {
     await db.insert(cashFlows).values(data);
@@ -151,12 +151,12 @@ export async function deleteCashFlow(id: number, userId: number) {
   await db.delete(cashFlows).where(and(eq(cashFlows.id, id), eq(cashFlows.userId, userId)));
 }
 
-export async function bulkReplaceCashFlows(userId: number, rows: Array<{ date: string; inflow: string; outflow: string }>) {
+export async function bulkReplaceCashFlows(userId: number, rows: Array<{ date: string; inflow: string; outflow: string; category?: string }>) {
   const db = await getDb();
   if (!db) return;
   await db.delete(cashFlows).where(eq(cashFlows.userId, userId));
   if (rows.length > 0) {
-    await db.insert(cashFlows).values(rows.map((r) => ({ userId, date: r.date, inflow: r.inflow, outflow: r.outflow })));
+    await db.insert(cashFlows).values(rows.map((r) => ({ userId, date: r.date, inflow: r.inflow, outflow: r.outflow, category: r.category })));
   }
 }
 

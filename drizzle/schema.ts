@@ -66,6 +66,7 @@ export const cashFlows = mysqlTable("cash_flows", {
   date: varchar("date", { length: 20 }).notNull(),
   inflow: decimal("inflow", { precision: 18, scale: 2 }).notNull().default("0"),
   outflow: decimal("outflow", { precision: 18, scale: 2 }).notNull().default("0"),
+  category: varchar("category", { length: 64 }),
   note: text("note"),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),

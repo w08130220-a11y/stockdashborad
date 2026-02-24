@@ -58,12 +58,18 @@ const DEFAULT_WATCHLIST = [
 ];
 
 const DEFAULT_CASHFLOWS = [
-  { date: "2025-01", inflow: "8000", outflow: "3200" },
-  { date: "2025-02", inflow: "8000", outflow: "2800" },
-  { date: "2025-03", inflow: "8500", outflow: "4100" },
-  { date: "2025-04", inflow: "8000", outflow: "3600" },
-  { date: "2025-05", inflow: "9200", outflow: "3900" },
-  { date: "2025-06", inflow: "8000", outflow: "2500" },
+  { date: "2025-01-05", inflow: "8000", outflow: "0", category: "薪資" },
+  { date: "2025-01-15", inflow: "0", outflow: "3200", category: "生活" },
+  { date: "2025-02-05", inflow: "8000", outflow: "0", category: "薪資" },
+  { date: "2025-02-15", inflow: "0", outflow: "2800", category: "生活" },
+  { date: "2025-03-05", inflow: "8500", outflow: "0", category: "薪資" },
+  { date: "2025-03-15", inflow: "0", outflow: "4100", category: "生活" },
+  { date: "2025-04-05", inflow: "8000", outflow: "0", category: "薪資" },
+  { date: "2025-04-15", inflow: "0", outflow: "3600", category: "生活" },
+  { date: "2025-05-05", inflow: "9200", outflow: "0", category: "薪資" },
+  { date: "2025-05-15", inflow: "0", outflow: "3900", category: "生活" },
+  { date: "2025-06-05", inflow: "8000", outflow: "0", category: "薪資" },
+  { date: "2025-06-15", inflow: "0", outflow: "2500", category: "生活" },
 ];
 
 export const appRouter = router({
@@ -289,21 +295,28 @@ export const appRouter = router({
         }
         rows = await getCashFlows(ctx.user.id);
       }
-      return rows.map((r) => ({
-        id: r.id,
-        date: r.date,
-        inflow: parseFloat(String(r.inflow)),
-        outflow: parseFloat(String(r.outflow)),
-        note: r.note,
-      }));
+      return rows.map((r) => {
+        const inf = parseFloat(String(r.inflow));
+        const outf = parseFloat(String(r.outflow));
+        const isIncome = inf > 0;
+        return {
+          id: r.id,
+          date: r.date,
+          type: isIncome ? "income" as const : "expense" as const,
+          amount: isIncome ? inf : outf,
+          category: r.category || "",
+          note: r.note || "",
+        };
+      });
     }),
 
     upsert: protectedProcedure
       .input(z.object({
         id: z.number().optional(),
         date: z.string().min(1),
-        inflow: z.number().min(0),
-        outflow: z.number().min(0),
+        type: z.enum(["income", "expense"]),
+        amount: z.number().min(0),
+        category: z.string().optional(),
         note: z.string().optional(),
       }))
       .mutation(async ({ ctx, input }) => {
@@ -311,8 +324,9 @@ export const appRouter = router({
           userId: ctx.user.id,
           id: input.id,
           date: input.date,
-          inflow: String(input.inflow),
-          outflow: String(input.outflow),
+          inflow: input.type === "income" ? String(input.amount) : "0",
+          outflow: input.type === "expense" ? String(input.amount) : "0",
+          category: input.category || null,
           note: input.note,
         });
         return { success: true };
@@ -328,13 +342,20 @@ export const appRouter = router({
     bulkReplace: protectedProcedure
       .input(z.array(z.object({
         date: z.string(),
-        inflow: z.number(),
-        outflow: z.number(),
+        type: z.enum(["income", "expense"]),
+        amount: z.number(),
+        category: z.string().optional(),
+        note: z.string().optional(),
       })))
       .mutation(async ({ ctx, input }) => {
         await bulkReplaceCashFlows(
           ctx.user.id,
-          input.map((r) => ({ date: r.date, inflow: String(r.inflow), outflow: String(r.outflow) }))
+          input.map((r) => ({
+            date: r.date,
+            inflow: r.type === "income" ? String(r.amount) : "0",
+            outflow: r.type === "expense" ? String(r.amount) : "0",
+            category: r.category,
+          }))
         );
         return { success: true };
       }),

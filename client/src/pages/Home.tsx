@@ -1259,7 +1259,7 @@ function CashFlowTab({
       acc[r.category || "其他"] = (acc[r.category || "其他"] || 0) + r.amount;
       return acc;
     }, {} as Record<string, number>)
-  ).map(([name, value]) => ({ name, value: +value.toFixed(0) })).sort((a, b) => b.value - a.value);
+  ).map(([name, value]) => ({ name, value: +(value as number).toFixed(0) })).sort((a, b) => b.value - a.value);
 
   // Investment performance
   const usHoldings = holdings.filter(h => h.market === "US");
