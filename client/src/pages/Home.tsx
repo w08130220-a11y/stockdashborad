@@ -518,7 +518,7 @@ export default function Home() {
       </main>
 
       <footer className="border-t border-border py-4 text-center text-xs text-muted-foreground">
-        {t("app.title")} · {locale === "zh-TW" ? "數據每 30 秒自動更新" : "Auto-refresh every 30s"} · Powered by Yahoo Finance API
+        {t("app.title")} · {locale === "zh-TW" ? "數據每 30 秒自動更新" : "Auto-refresh every 30s"} · Powered by Twelve Data API
       </footer>
     </div>
   );
@@ -682,12 +682,25 @@ function OverviewTab({
         {/* Sector Distribution */}
         <div className="rounded-xl border border-border bg-card p-4">
           <div className="text-sm font-semibold mb-3">{t("overview.sectorDist")}</div>
-          <ResponsiveContainer width="100%" height={200}>
+          <ResponsiveContainer width="100%" height={240}>
             <PieChart>
-              <Pie data={sectorData} cx="50%" cy="50%" outerRadius={75} innerRadius={40} paddingAngle={2} dataKey="value" nameKey="name" label={({ name, percent }) => `${name} ${(percent * 100).toFixed(0)}%`} labelLine={false} style={{ fontSize: 10 }}>
+              <Pie data={sectorData} cx="50%" cy="45%" outerRadius={65} innerRadius={35} paddingAngle={2} dataKey="value" nameKey="name"
+                label={({ name, percent, cx, cy, midAngle, outerRadius: oR }) => {
+                  const RADIAN = Math.PI / 180;
+                  const radius = oR + 20;
+                  const x = cx + radius * Math.cos(-midAngle * RADIAN);
+                  const y = cy + radius * Math.sin(-midAngle * RADIAN);
+                  return (
+                    <text x={x} y={y} fill="var(--foreground)" fontSize={10} textAnchor={x > cx ? "start" : "end"} dominantBaseline="central">
+                      {name} {(percent * 100).toFixed(0)}%
+                    </text>
+                  );
+                }}
+                labelLine={{ stroke: "var(--muted-foreground)", strokeWidth: 1 }}
+              >
                 {sectorData.map((entry) => <Cell key={entry.name} fill={SECTOR_COLORS[entry.name] || "var(--muted-foreground)"} />)}
               </Pie>
-              <Legend wrapperStyle={{ fontSize: 10 }} />
+              <Legend wrapperStyle={{ fontSize: 10, paddingTop: 8 }} />
             </PieChart>
           </ResponsiveContainer>
         </div>
@@ -715,6 +728,31 @@ function OverviewTab({
           <div className="flex items-center gap-3">
             <span className="text-sm font-semibold">{t("overview.holdings")}</span>
             <MarketTabs value={marketFilter} onChange={setMarketFilter} t={t} />
+          </div>
+          {/* US / TW P&L Summary */}
+          <div className="flex items-center gap-4 flex-1 justify-center">
+            {usTotalCost > 0 && (
+              <div className="flex items-center gap-1.5 px-3 py-1 rounded-lg bg-muted/50">
+                <span className="text-[10px] text-muted-foreground font-medium">{locale === "zh-TW" ? "美股損益" : "US P&L"}</span>
+                <span className="text-xs font-bold" style={{ color: usPnl >= 0 ? "var(--color-stock-green)" : "var(--color-stock-red)" }}>
+                  {usPnl >= 0 ? "+" : "-"}${fmt(Math.abs(usPnl))}
+                </span>
+                <span className="text-[10px]" style={{ color: usPnl >= 0 ? "var(--color-stock-green)" : "var(--color-stock-red)" }}>
+                  ({pct(usPnlPct)})
+                </span>
+              </div>
+            )}
+            {twTotalCost > 0 && (
+              <div className="flex items-center gap-1.5 px-3 py-1 rounded-lg bg-muted/50">
+                <span className="text-[10px] text-muted-foreground font-medium">{locale === "zh-TW" ? "台股損益" : "TW P&L"}</span>
+                <span className="text-xs font-bold" style={{ color: twPnl >= 0 ? "var(--color-stock-green)" : "var(--color-stock-red)" }}>
+                  {twPnl >= 0 ? "+" : "-"}NT${Math.abs(twPnl).toLocaleString("zh-TW", { minimumFractionDigits: 0, maximumFractionDigits: 0 })}
+                </span>
+                <span className="text-[10px]" style={{ color: twPnl >= 0 ? "var(--color-stock-green)" : "var(--color-stock-red)" }}>
+                  ({pct(twPnlPct)})
+                </span>
+              </div>
+            )}
           </div>
           <div className="flex items-center gap-2">
             {/* Vol filter */}
@@ -1162,23 +1200,78 @@ function CashFlowTab({
   const [newRecord, setNewRecord] = useState({ date: "", type: "income" as "income" | "expense", amount: "", category: "", note: "" });
   const [editingBalance, setEditingBalance] = useState(false);
   const [balanceVal, setBalanceVal] = useState(String(cashBalance));
+  const [viewRange, setViewRange] = useState<"6m" | "12m" | "all">("6m");
   const fileRef = useRef<HTMLInputElement>(null);
 
+  // ─── Calculations ───
+  const sortedRecords = [...records].sort((a, b) => (a.date || "").localeCompare(b.date || ""));
+  const now = new Date();
+  const rangeMonths = viewRange === "6m" ? 6 : viewRange === "12m" ? 12 : 999;
+
+  // Generate last N months as "YYYY-MM"
+  const monthKeys: string[] = [];
+  for (let i = Math.min(rangeMonths, 12) - 1; i >= 0; i--) {
+    const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+    monthKeys.push(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`);
+  }
+
+  // Monthly aggregation
+  const monthlyMap: Record<string, { income: number; expense: number }> = {};
+  for (const k of monthKeys) monthlyMap[k] = { income: 0, expense: 0 };
+  for (const r of sortedRecords) {
+    const m = r.date ? r.date.substring(0, 7) : null;
+    if (m && monthlyMap[m]) {
+      if (r.type === "income") monthlyMap[m].income += r.amount;
+      else monthlyMap[m].expense += r.amount;
+    }
+  }
+
+  const monthlyData = monthKeys.map((k) => ({
+    month: k,
+    label: `${k.substring(2, 4)}/${k.substring(5)}`, // "24/01" format
+    income: monthlyMap[k]?.income || 0,
+    expense: monthlyMap[k]?.expense || 0,
+    net: (monthlyMap[k]?.income || 0) - (monthlyMap[k]?.expense || 0),
+  }));
+
+  // Cumulative net worth trend (cash balance + net cashflow accumulation)
+  let cumulative = cashBalance;
+  const netWorthTrend = monthlyData.map((m) => {
+    cumulative += m.net;
+    return { month: m.label, value: cumulative };
+  });
+
+  // Totals
   const totalIncome = records.filter((r) => r.type === "income").reduce((s, r) => s + r.amount, 0);
   const totalExpense = records.filter((r) => r.type === "expense").reduce((s, r) => s + r.amount, 0);
   const netCashflow = totalIncome - totalExpense;
   const savingsRate = totalIncome > 0 ? ((netCashflow / totalIncome) * 100) : 0;
 
-  // Monthly chart data
-  const monthlyData = Object.entries(
-    records.reduce((acc, r) => {
-      const m = r.date ? r.date.substring(0, 7) : "N/A";
-      if (!acc[m]) acc[m] = { month: m, income: 0, expense: 0 };
-      if (r.type === "income") acc[m].income += r.amount;
-      else acc[m].expense += r.amount;
+  // This month's data
+  const thisMonthKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+  const thisMonth = records.filter((r) => r.date?.startsWith(thisMonthKey));
+  const thisIncome = thisMonth.filter(r => r.type === "income").reduce((s, r) => s + r.amount, 0);
+  const thisExpense = thisMonth.filter(r => r.type === "expense").reduce((s, r) => s + r.amount, 0);
+
+  // Expense by category
+  const catData = Object.entries(
+    records.filter(r => r.type === "expense").reduce((acc, r) => {
+      acc[r.category || "其他"] = (acc[r.category || "其他"] || 0) + r.amount;
       return acc;
-    }, {} as Record<string, { month: string; income: number; expense: number }>)
-  ).map(([, v]) => v as { month: string; income: number; expense: number }).sort((a, b) => a.month.localeCompare(b.month)).slice(-12);
+    }, {} as Record<string, number>)
+  ).map(([name, value]) => ({ name, value: +value.toFixed(0) })).sort((a, b) => b.value - a.value);
+
+  // Investment performance
+  const usHoldings = holdings.filter(h => h.market === "US");
+  const twHoldings = holdings.filter(h => h.market === "TW");
+  const usCost = usHoldings.reduce((s, h) => s + h.cost, 0);
+  const usValue = usHoldings.reduce((s, h) => s + h.value, 0);
+  const usPnl = usValue - usCost;
+  const twCost = twHoldings.reduce((s, h) => s + h.cost, 0);
+  const twValue = twHoldings.reduce((s, h) => s + h.value, 0);
+  const twPnl = twValue - twCost;
+
+  const CAT_COLORS = ["#ef4444", "#f97316", "#eab308", "#22c55e", "#3b82f6", "#8b5cf6", "#ec4899", "#6b7280"];
 
   const handleAdd = () => {
     if (!newRecord.date || !newRecord.amount) return;
@@ -1211,13 +1304,28 @@ function CashFlowTab({
   };
 
   return (
-    <div className="flex flex-col gap-6">
-      {/* Summary Cards */}
+    <div className="flex flex-col gap-5">
+      {/* ── Row 1: Summary Cards ── */}
       <div className="grid grid-cols-2 lg:grid-cols-5 gap-3">
-        <StatCard label={t("cf.totalIncome")} value={`$${fmt(totalIncome)}`} color="var(--color-stock-green)" icon={<TrendingUp size={13} />} />
-        <StatCard label={t("cf.totalExpense")} value={`$${fmt(totalExpense)}`} color="var(--color-stock-red)" icon={<TrendingDown size={13} />} />
-        <StatCard label={t("cf.netCashflow")} value={`${netCashflow >= 0 ? "+" : ""}$${fmt(Math.abs(netCashflow))}`} color={netCashflow >= 0 ? "var(--color-stock-green)" : "var(--color-stock-red)"} icon={<DollarSign size={13} />} />
-        <StatCard label={t("cf.savingsRate")} value={`${savingsRate.toFixed(1)}%`} icon={<BarChart2 size={13} />} />
+        <div className="rounded-xl border border-border bg-card p-3">
+          <div className="text-[10px] text-muted-foreground mb-1">{locale === "zh-TW" ? "本月收入" : "This Month Income"}</div>
+          <div className="text-lg font-bold" style={{ color: "var(--color-stock-green)" }}>+${fmt(thisIncome)}</div>
+        </div>
+        <div className="rounded-xl border border-border bg-card p-3">
+          <div className="text-[10px] text-muted-foreground mb-1">{locale === "zh-TW" ? "本月支出" : "This Month Expense"}</div>
+          <div className="text-lg font-bold" style={{ color: "var(--color-stock-red)" }}>-${fmt(thisExpense)}</div>
+        </div>
+        <div className="rounded-xl border border-border bg-card p-3">
+          <div className="text-[10px] text-muted-foreground mb-1">{locale === "zh-TW" ? "淨現金流" : "Net Cash Flow"}</div>
+          <div className="text-lg font-bold" style={{ color: netCashflow >= 0 ? "var(--color-stock-green)" : "var(--color-stock-red)" }}>
+            {netCashflow >= 0 ? "+" : "-"}${fmt(Math.abs(netCashflow))}
+          </div>
+          <div className="text-[10px] text-muted-foreground">{locale === "zh-TW" ? "儲蓄率" : "Savings"}: {savingsRate.toFixed(1)}%</div>
+        </div>
+        <div className="rounded-xl border border-border bg-card p-3">
+          <div className="text-[10px] text-muted-foreground mb-1">{locale === "zh-TW" ? "投資總值" : "Portfolio Value"}</div>
+          <div className="text-lg font-bold">${fmt(usValue + twValue)}</div>
+        </div>
         <div className="rounded-xl border border-border bg-card p-3">
           <div className="text-[10px] text-muted-foreground mb-1">{locale === "zh-TW" ? "現金水位" : "Cash Balance"}</div>
           {editingBalance ? (
@@ -1236,108 +1344,165 @@ function CashFlowTab({
         </div>
       </div>
 
-      {/* Monthly Chart */}
-      <div className="rounded-xl border border-border bg-card p-4">
-        <div className="flex items-center justify-between mb-3">
-          <span className="text-sm font-semibold">{t("cf.monthlyChart")}</span>
-          <div className="flex gap-2">
-            <Button size="sm" variant="outline" onClick={() => setShowAddForm(!showAddForm)} className="gap-1 text-xs h-7">
-              <Plus size={11} /> {t("cf.addRecord")}
-            </Button>
-            <Button size="sm" variant="outline" onClick={() => fileRef.current?.click()} className="gap-1 text-xs h-7">
-              <Upload size={11} /> {t("cf.uploadExcel")}
-            </Button>
-            <input ref={fileRef} type="file" accept=".xlsx,.csv" className="hidden" onChange={handleUpload} />
+      {/* ── Row 2: Monthly Chart + Category Pie ── */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+        {/* Monthly Income/Expense Chart */}
+        <div className="lg:col-span-2 rounded-xl border border-border bg-card p-4">
+          <div className="flex items-center justify-between mb-3">
+            <span className="text-sm font-semibold">{locale === "zh-TW" ? "月度收支" : "Monthly Income & Expense"}</span>
+            <div className="flex items-center gap-2">
+              <div className="flex gap-1 bg-muted rounded-lg p-0.5">
+                {(["6m", "12m", "all"] as const).map(r => (
+                  <button key={r} onClick={() => setViewRange(r)}
+                    className={`px-2 py-0.5 rounded text-[10px] font-medium transition-colors ${viewRange === r ? "bg-background text-foreground shadow-sm" : "text-muted-foreground"}`}>
+                    {r === "6m" ? "6M" : r === "12m" ? "1Y" : locale === "zh-TW" ? "全部" : "All"}
+                  </button>
+                ))}
+              </div>
+              <Button size="sm" variant="outline" onClick={() => setShowAddForm(!showAddForm)} className="gap-1 text-xs h-7">
+                <Plus size={11} /> {locale === "zh-TW" ? "新增" : "Add"}
+              </Button>
+              <Button size="sm" variant="outline" onClick={() => fileRef.current?.click()} className="gap-1 text-xs h-7">
+                <Upload size={11} /> {locale === "zh-TW" ? "匯入" : "Import"}
+              </Button>
+              <input ref={fileRef} type="file" accept=".xlsx,.csv" className="hidden" onChange={handleUpload} />
+            </div>
           </div>
+
+          {showAddForm && (
+            <div className="p-3 mb-3 rounded-lg bg-muted/20 border border-border flex flex-wrap gap-2 items-end">
+              <div className="flex flex-col gap-1">
+                <label className="text-[10px] text-muted-foreground">{t("cf.date")}</label>
+                <input type="date" value={newRecord.date} onChange={(e) => setNewRecord({ ...newRecord, date: e.target.value })}
+                  className="w-36 px-2 py-1.5 rounded-lg border border-border bg-background text-sm" />
+              </div>
+              <div className="flex flex-col gap-1">
+                <label className="text-[10px] text-muted-foreground">{t("cf.type")}</label>
+                <select value={newRecord.type} onChange={(e) => setNewRecord({ ...newRecord, type: e.target.value as "income" | "expense" })}
+                  className="w-24 px-2 py-1.5 rounded-lg border border-border bg-background text-sm">
+                  <option value="income">{t("cf.income")}</option>
+                  <option value="expense">{t("cf.expense")}</option>
+                </select>
+              </div>
+              <div className="flex flex-col gap-1">
+                <label className="text-[10px] text-muted-foreground">{t("cf.amount")}</label>
+                <input type="number" value={newRecord.amount} onChange={(e) => setNewRecord({ ...newRecord, amount: e.target.value })}
+                  placeholder="1000" className="w-24 px-2 py-1.5 rounded-lg border border-border bg-background text-sm" />
+              </div>
+              <div className="flex flex-col gap-1">
+                <label className="text-[10px] text-muted-foreground">{t("cf.category")}</label>
+                <input value={newRecord.category} onChange={(e) => setNewRecord({ ...newRecord, category: e.target.value })}
+                  placeholder={locale === "zh-TW" ? "薪資" : "Salary"} className="w-20 px-2 py-1.5 rounded-lg border border-border bg-background text-sm placeholder:text-muted-foreground" />
+              </div>
+              <div className="flex flex-col gap-1">
+                <label className="text-[10px] text-muted-foreground">{t("cf.note")}</label>
+                <input value={newRecord.note} onChange={(e) => setNewRecord({ ...newRecord, note: e.target.value })}
+                  placeholder={locale === "zh-TW" ? "備註" : "Note"} className="w-24 px-2 py-1.5 rounded-lg border border-border bg-background text-sm placeholder:text-muted-foreground" />
+              </div>
+              <Button size="sm" onClick={handleAdd} className="gap-1 text-xs h-8"><Plus size={11} /> {t("form.add")}</Button>
+              <Button size="sm" variant="ghost" onClick={() => setShowAddForm(false)} className="text-xs h-8">{t("form.cancel")}</Button>
+            </div>
+          )}
+
+          <ResponsiveContainer width="100%" height={200}>
+            <BarChart data={monthlyData} barGap={2}>
+              <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
+              <XAxis dataKey="label" tick={{ fontSize: 10, fill: "var(--color-muted-foreground)" }} />
+              <YAxis tick={{ fontSize: 10, fill: "var(--color-muted-foreground)" }} width={50}
+                tickFormatter={(v) => v >= 1000 ? `${(v / 1000).toFixed(0)}k` : v} />
+              <RechartsTooltip contentStyle={{ background: "var(--card)", border: "1px solid var(--border)", borderRadius: 8, fontSize: 12 }}
+                formatter={(value: number, name: string) => [`$${value.toLocaleString()}`, name]} />
+              <Bar dataKey="income" name={locale === "zh-TW" ? "收入" : "Income"} fill="var(--color-stock-green)" radius={[3, 3, 0, 0]} />
+              <Bar dataKey="expense" name={locale === "zh-TW" ? "支出" : "Expense"} fill="var(--color-stock-red)" radius={[3, 3, 0, 0]} />
+              <Legend wrapperStyle={{ fontSize: 11 }} />
+            </BarChart>
+          </ResponsiveContainer>
         </div>
 
-        {showAddForm && (
-          <div className="p-3 mb-3 rounded-lg bg-muted/20 border border-border flex flex-wrap gap-2 items-end">
-            <div className="flex flex-col gap-1">
-              <label className="text-[10px] text-muted-foreground">{t("cf.date")}</label>
-              <input type="date" value={newRecord.date} onChange={(e) => setNewRecord({ ...newRecord, date: e.target.value })}
-                className="w-36 px-2 py-1.5 rounded-lg border border-border bg-background text-sm text-foreground" />
-            </div>
-            <div className="flex flex-col gap-1">
-              <label className="text-[10px] text-muted-foreground">{t("cf.type")}</label>
-              <select value={newRecord.type} onChange={(e) => setNewRecord({ ...newRecord, type: e.target.value as "income" | "expense" })}
-                className="w-24 px-2 py-1.5 rounded-lg border border-border bg-background text-sm text-foreground">
-                <option value="income">{t("cf.income")}</option>
-                <option value="expense">{t("cf.expense")}</option>
-              </select>
-            </div>
-            <div className="flex flex-col gap-1">
-              <label className="text-[10px] text-muted-foreground">{t("cf.amount")}</label>
-              <input type="number" value={newRecord.amount} onChange={(e) => setNewRecord({ ...newRecord, amount: e.target.value })}
-                placeholder="1000" className="w-24 px-2 py-1.5 rounded-lg border border-border bg-background text-sm text-foreground" />
-            </div>
-            <div className="flex flex-col gap-1">
-              <label className="text-[10px] text-muted-foreground">{t("cf.category")}</label>
-              <input value={newRecord.category} onChange={(e) => setNewRecord({ ...newRecord, category: e.target.value })}
-                placeholder={locale === "zh-TW" ? "薪資" : "Salary"} className="w-20 px-2 py-1.5 rounded-lg border border-border bg-background text-sm text-foreground placeholder:text-muted-foreground" />
-            </div>
-            <div className="flex flex-col gap-1">
-              <label className="text-[10px] text-muted-foreground">{t("cf.note")}</label>
-              <input value={newRecord.note} onChange={(e) => setNewRecord({ ...newRecord, note: e.target.value })}
-                placeholder={locale === "zh-TW" ? "備註" : "Note"} className="w-24 px-2 py-1.5 rounded-lg border border-border bg-background text-sm text-foreground placeholder:text-muted-foreground" />
-            </div>
-            <Button size="sm" onClick={handleAdd} className="gap-1 text-xs h-8"><Plus size={11} /> {t("form.add")}</Button>
-            <Button size="sm" variant="ghost" onClick={() => setShowAddForm(false)} className="text-xs h-8">{t("form.cancel")}</Button>
-          </div>
-        )}
-
-        <ResponsiveContainer width="100%" height={220}>
-          <BarChart data={monthlyData}>
-            <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
-            <XAxis dataKey="month" tick={{ fontSize: 10, fill: "var(--color-muted-foreground)" }} />
-            <YAxis tick={{ fontSize: 10, fill: "var(--color-muted-foreground)" }} />
-            <RechartsTooltip contentStyle={{ background: "var(--card)", border: "1px solid var(--border)", borderRadius: 8, fontSize: 12 }} />
-            <Bar dataKey="income" name={t("cf.income")} fill="var(--color-stock-green)" radius={[3, 3, 0, 0]} />
-            <Bar dataKey="expense" name={t("cf.expense")} fill="var(--color-stock-red)" radius={[3, 3, 0, 0]} />
-            <Legend wrapperStyle={{ fontSize: 11 }} />
-          </BarChart>
-        </ResponsiveContainer>
+        {/* Expense Category Pie */}
+        <div className="rounded-xl border border-border bg-card p-4">
+          <div className="text-sm font-semibold mb-3">{locale === "zh-TW" ? "支出分類" : "Expense Categories"}</div>
+          {catData.length > 0 ? (
+            <>
+              <ResponsiveContainer width="100%" height={160}>
+                <PieChart>
+                  <Pie data={catData} cx="50%" cy="50%" outerRadius={55} innerRadius={30} paddingAngle={2} dataKey="value" nameKey="name">
+                    {catData.map((_, i) => <Cell key={i} fill={CAT_COLORS[i % CAT_COLORS.length]} />)}
+                  </Pie>
+                  <RechartsTooltip contentStyle={{ background: "var(--card)", border: "1px solid var(--border)", borderRadius: 8, fontSize: 11 }} />
+                </PieChart>
+              </ResponsiveContainer>
+              <div className="flex flex-wrap gap-x-3 gap-y-1 mt-2 justify-center">
+                {catData.slice(0, 6).map((c, i) => (
+                  <div key={c.name} className="flex items-center gap-1">
+                    <div className="w-2 h-2 rounded-full" style={{ background: CAT_COLORS[i % CAT_COLORS.length] }} />
+                    <span className="text-[10px] text-muted-foreground">{c.name} ${fmt(c.value)}</span>
+                  </div>
+                ))}
+              </div>
+            </>
+          ) : (
+            <div className="flex items-center justify-center h-40 text-sm text-muted-foreground">{t("common.noData")}</div>
+          )}
+        </div>
       </div>
 
-      {/* Holdings Performance by market */}
+      {/* ── Row 3: Investment P&L Cards ── */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         {/* US Performance */}
         <div className="rounded-xl border border-border bg-card p-4">
-          <div className="text-sm font-semibold mb-3">🇺🇸 {locale === "zh-TW" ? "美股績效排名" : "US Performance"}</div>
+          <div className="flex items-center justify-between mb-3">
+            <span className="text-sm font-semibold">🇺🇸 {locale === "zh-TW" ? "美股績效" : "US Performance"}</span>
+            {usCost > 0 && <span className="text-xs font-bold px-2 py-0.5 rounded-full" style={{
+              background: usPnl >= 0 ? "var(--color-stock-green-bg)" : "var(--color-stock-red-bg)",
+              color: usPnl >= 0 ? "var(--color-stock-green)" : "var(--color-stock-red)",
+            }}>{usPnl >= 0 ? "+" : ""}${fmt(usPnl)} ({pct(usCost > 0 ? (usPnl / usCost) * 100 : 0)})</span>}
+          </div>
           <div className="flex flex-col gap-2">
-            {[...holdings].filter(h => h.market === "US").sort((a, b) => b.pnlPct - a.pnlPct).slice(0, 6).map((h) => (
+            {usHoldings.length === 0 && <div className="text-xs text-muted-foreground text-center py-3">{t("common.noData")}</div>}
+            {[...usHoldings].sort((a, b) => b.pnlPct - a.pnlPct).slice(0, 6).map((h) => (
               <div key={`${h.id}-${h.symbol}`} className="flex items-center gap-2">
                 <span className="w-14 font-bold text-xs">{h.symbol}</span>
+                <span className="w-16 text-right text-[10px] text-muted-foreground">{h.currency === "TWD" ? "NT$" : "$"}{h.price.toLocaleString()}</span>
                 <div className="flex-1 h-2 rounded-full bg-muted overflow-hidden">
                   <div className="h-full rounded-full" style={{ width: `${Math.min(100, Math.abs(h.pnlPct) * 2)}%`, background: h.pnlPct >= 0 ? "var(--color-stock-green)" : "var(--color-stock-red)" }} />
                 </div>
                 <span className="w-14 text-right text-xs font-semibold" style={{ color: h.pnlPct >= 0 ? "var(--color-stock-green)" : "var(--color-stock-red)" }}>{pct(h.pnlPct)}</span>
               </div>
             ))}
-            {holdings.filter(h => h.market === "US").length === 0 && <div className="text-xs text-muted-foreground text-center py-3">{t("common.noData")}</div>}
           </div>
         </div>
         {/* TW Performance */}
         <div className="rounded-xl border border-border bg-card p-4">
-          <div className="text-sm font-semibold mb-3">🇹🇼 {locale === "zh-TW" ? "台股績效排名" : "TW Performance"}</div>
+          <div className="flex items-center justify-between mb-3">
+            <span className="text-sm font-semibold">🇹🇼 {locale === "zh-TW" ? "台股績效" : "TW Performance"}</span>
+            {twCost > 0 && <span className="text-xs font-bold px-2 py-0.5 rounded-full" style={{
+              background: twPnl >= 0 ? "var(--color-stock-green-bg)" : "var(--color-stock-red-bg)",
+              color: twPnl >= 0 ? "var(--color-stock-green)" : "var(--color-stock-red)",
+            }}>{twPnl >= 0 ? "+" : ""}NT${Math.abs(twPnl).toLocaleString("zh-TW", { maximumFractionDigits: 0 })} ({pct(twCost > 0 ? (twPnl / twCost) * 100 : 0)})</span>}
+          </div>
           <div className="flex flex-col gap-2">
-            {[...holdings].filter(h => h.market === "TW").sort((a, b) => b.pnlPct - a.pnlPct).slice(0, 6).map((h) => (
+            {twHoldings.length === 0 && <div className="text-xs text-muted-foreground text-center py-3">{t("common.noData")}</div>}
+            {[...twHoldings].sort((a, b) => b.pnlPct - a.pnlPct).slice(0, 6).map((h) => (
               <div key={`${h.id}-${h.symbol}`} className="flex items-center gap-2">
-                <span className="w-14 font-bold text-xs">{h.symbol}</span>
+                <span className="w-14 font-bold text-xs">{h.symbol.replace(".TW", "")}</span>
+                <span className="w-12 text-right text-[10px] text-muted-foreground">{TW_SECTOR_MAP_CLIENT[h.symbol.replace(".TW", "")] || ""}</span>
                 <div className="flex-1 h-2 rounded-full bg-muted overflow-hidden">
                   <div className="h-full rounded-full" style={{ width: `${Math.min(100, Math.abs(h.pnlPct) * 2)}%`, background: h.pnlPct >= 0 ? "var(--color-stock-green)" : "var(--color-stock-red)" }} />
                 </div>
                 <span className="w-14 text-right text-xs font-semibold" style={{ color: h.pnlPct >= 0 ? "var(--color-stock-green)" : "var(--color-stock-red)" }}>{pct(h.pnlPct)}</span>
               </div>
             ))}
-            {holdings.filter(h => h.market === "TW").length === 0 && <div className="text-xs text-muted-foreground text-center py-3">{t("common.noData")}</div>}
           </div>
         </div>
       </div>
 
-      {/* Records Table */}
+      {/* ── Row 4: Records Table ── */}
       <div className="rounded-xl border border-border bg-card overflow-hidden">
-        <div className="p-4 border-b border-border text-sm font-semibold">{locale === "zh-TW" ? "現金流記錄" : "Cash Flow Records"}</div>
+        <div className="p-4 border-b border-border flex items-center justify-between">
+          <span className="text-sm font-semibold">{locale === "zh-TW" ? "現金流記錄" : "Cash Flow Records"}</span>
+          <span className="text-xs text-muted-foreground">{records.length} {locale === "zh-TW" ? "筆" : "records"}</span>
+        </div>
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
@@ -1351,9 +1516,9 @@ function CashFlowTab({
               {records.length === 0 ? (
                 <tr><td colSpan={6} className="px-4 py-8 text-center text-muted-foreground text-sm">{t("cf.noRecords")}</td></tr>
               ) : (
-                records.slice(0, 20).map((r: any) => (
+                [...records].sort((a, b) => (b.date || "").localeCompare(a.date || "")).slice(0, 30).map((r: any) => (
                   <tr key={r.id} className="border-b border-border hover:bg-muted/20 transition-colors">
-                    <td className="px-3 py-2 text-xs">{r.date}</td>
+                    <td className="px-3 py-2 text-xs font-mono">{r.date}</td>
                     <td className="px-3 py-2">
                       <span className="text-xs font-semibold px-2 py-0.5 rounded-full" style={{
                         background: r.type === "income" ? "var(--color-stock-green-bg)" : "var(--color-stock-red-bg)",
@@ -1380,6 +1545,13 @@ function CashFlowTab({
     </div>
   );
 }
+
+// TW sector name lookup for CashFlowTab
+const TW_SECTOR_MAP_CLIENT: Record<string, string> = {
+  "2330": "台積電", "2317": "鴻海", "2454": "聯發科", "2308": "台達電", "2382": "廣達",
+  "3037": "欣興", "6153": "嘉澤端子", "3231": "緯創", "2881": "富邦金", "2882": "國泰金",
+  "2884": "玉山金", "2886": "兆豐金", "2891": "中信金", "0050": "元大台灣50",
+};
 
 
 // ═══════════════════════════════════════════════════════

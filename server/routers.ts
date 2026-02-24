@@ -78,7 +78,7 @@ export const appRouter = router({
     }),
   }),
 
-  // ─── Stock Quotes (via yfinance) ─── 
+  // ─── Stock Quotes (via Twelve Data API + yfinance fallback) ─── 
   stock: router({
     quotes: protectedProcedure
       .input(z.object({ symbols: z.array(z.string()) }))

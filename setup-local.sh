@@ -22,8 +22,7 @@ NODE_VER=$(node -v | sed 's/v//' | cut -d. -f1)
 ok "Node.js $(node -v)"
 command -v pnpm >/dev/null 2>&1 || { warn "pnpm 不存在，正在安裝..."; npm install -g pnpm; }
 ok "pnpm $(pnpm -v)"
-command -v python3 >/dev/null 2>&1 || fail "找不到 Python3 (需要 ≥ 3.10)"
-ok "Python3 $(python3 --version 2>&1 | awk '{print $2}')"
+command -v python3 >/dev/null 2>&1 && ok "Python3 $(python3 --version 2>&1 | awk '{print $2}') (yfinance 備援可用)" || warn "Python3 未安裝 (yfinance 備援不可用，需使用 Twelve Data API)"
 
 # ─── 2. 安裝 Node.js 依賴 ───
 step "安裝 Node.js 依賴..."
@@ -51,10 +50,24 @@ JWT_SECRET=my-local-dev-secret-key-change-me
 VITE_APP_ID=stock-dashboard
 OWNER_OPEN_ID=local-owner
 
-# ─── Stock Data (Python yfinance) ───
+# ─── Stock Data: Twelve Data API (primary) ───
+# Get your free API key: https://twelvedata.com/pricing
+# Free = US stocks only (8 req/min)
+# Pro ($99/mo) = Taiwan stocks + US stocks (610 req/min)
+TWELVE_DATA_API_KEY=
+
+# ─── Stock Data: yfinance fallback (optional) ───
 YFINANCE_API_URL=http://localhost:5001
 ENVEOF
   ok ".env 已建立"
+  echo ""
+  read -p "  輸入 Twelve Data API Key (或按 Enter 跳過使用 yfinance): " TD_KEY
+  if [ -n "$TD_KEY" ]; then
+    sed -i "s/^TWELVE_DATA_API_KEY=$/TWELVE_DATA_API_KEY=$TD_KEY/" .env
+    ok "Twelve Data API Key 已設定"
+  else
+    warn "未設定 Twelve Data Key，將使用 yfinance 備援（需啟動 Python 服務）"
+  fi
 fi
 
 # ─── 5. MySQL ───
@@ -96,19 +109,21 @@ echo "════════════════════════�
 echo -e " ${GREEN}✅ 安裝完成！${NC}"
 echo "═══════════════════════════════════════════════════════"
 echo ""
-echo -e " ${CYAN}啟動步驟（兩個終端機）：${NC}"
+echo -e " ${CYAN}啟動步驟：${NC}"
 echo ""
-echo "   終端機 1 — 股價服務:"
-echo "     source venv/bin/activate"
-echo "     python3 server/yfinance_service.py"
-echo ""
-echo "   終端機 2 — Web 服務:"
+echo "   方案 A — 使用 Twelve Data API（推薦）:"
 echo "     pnpm dev"
+echo "     # 確認 .env 裡 TWELVE_DATA_API_KEY 已設定"
+echo ""
+echo "   方案 B — 使用 yfinance 備援（兩個終端機）:"
+echo "     終端機 1: source venv/bin/activate && python3 server/yfinance_service.py"
+echo "     終端機 2: pnpm dev"
 echo ""
 echo "   瀏覽器打開: http://localhost:3000"
 echo ""
 echo " ─────────────────────────────────────────────"
 echo " 📝 自動登入管理員帳號，不需要輸入帳密"
-echo " 📈 股價來自 yfinance (免費、無限量)"
+echo " 📈 Twelve Data API: US 即時 / 台股 EOD"
+echo " 📈 yfinance 備援: 免費無限量 (可選)"
 echo " 💎 訂閱系統 LAUNCH_MODE = 全功能免費"
 echo "═══════════════════════════════════════════════════════"
