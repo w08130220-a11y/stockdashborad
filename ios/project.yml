@@ -1,0 +1,40 @@
+name: Blip
+options:
+  bundleIdPrefix: com.blip
+  deploymentTarget:
+    iOS: "16.0"
+  createIntermediateGroups: true
+
+settings:
+  base:
+    MARKETING_VERSION: "1.0.0"
+    CURRENT_PROJECT_VERSION: "1"
+    DEVELOPMENT_TEAM: ""
+    SWIFT_VERSION: "5.9"
+    GENERATE_INFOPLIST_FILE: NO
+
+targets:
+  Blip:
+    type: application
+    platform: iOS
+    sources:
+      - path: Blip
+    info:
+      path: Blip/Resources/Info.plist
+      properties:
+        CFBundleDisplayName: Blip
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+        NSLocationWhenInUseUsageDescription: "Blip 需要你的位置，才能顯示附近 3 公里內的限時分享。"
+        NSPhotoLibraryUsageDescription: "選擇要分享的照片或影片。"
+        NSCameraUsageDescription: "拍攝要分享的照片或影片。"
+        NSMicrophoneUsageDescription: "錄製影片時需要麥克風。"
+        # 開發階段允許連線到本機 / 區網的後端 (http)
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+    settings:
+      base:
+        TARGETED_DEVICE_FAMILY: "1"
+        PRODUCT_BUNDLE_IDENTIFIER: com.blip.app
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
