@@ -1,20 +1,22 @@
-# 📈 Stock Dashboard v4
+# 📍 Blip
 
-個人投資組合管理儀表板，支援台股 + 美股即時追蹤。
+只跟**附近 3 公里**的人，用 **24 小時就消失**的照片與 10 秒影片交流的社群 App。
+找不到搜尋框 —— 唯一認識新朋友的方式，是在附近遇到對方的分享。
 
 ## ✨ 功能
 
-- **持股管理** — 新增 / 編輯 / 刪除持股，Excel 批次匯入
-- **即時股價** — 透過 yfinance 取得即時報價、技術指標 (RSI, Beta, MA50, MA200)
-- **觀察清單** — 追蹤感興趣的股票
-- **價格警報** — 設定價格到達通知
-- **移動停損** — 自動追蹤最高價，設定停損百分比
-- **資金流水** — 記錄存入 / 提出，計算投入成本
-- **多幣別** — 台幣 / 美金持股分開計算
-- **迷你走勢圖** — 60 日收盤價 Sparkline
-- **深色模式** — 淺色 / 深色主題切換
-- **中英文切換** — 完整 i18n 支援
-- **訂閱系統** — 三級方案架構 (Free / Pro / Premium)，初期免費開放
+- **限時分享** — 照片或最長 10 秒的影片，發佈滿 24 小時自動銷毀
+- **附近 3 公里** — 只看得到自己周圍 3 公里內的分享（用裝置定位 + Haversine 過濾）
+- **追蹤不受距離限制** — 追蹤過的人，跑到 3 公里外也能在「追蹤中」看到
+- **相遇才能追蹤** — 只有在附近看過對方的分享後才會出現追蹤按鈕，**不能用搜尋追蹤**
+- **個人專屬介面** — 自訂頭像、暱稱、自我介紹與主題色
+- **一鍵表情回應** — 🔥❤️😂👀😮💯，取代留言、輕鬆不易吵架
+- **消失倒數** — 每則分享顯示距離銷毀的剩餘時間
+- **雷達** — 用雷達圖呈現附近正在分享的熱點
+- **連續分享 Streak** — 每天分享累積 🔥 天數
+- **保存自己的回憶** — 消失前可把自己的貼文保存到本人封存頁
+
+> 設計走美式社群風格：大膽粗體字、鮮豔漸層、全螢幕卡片。
 
 ## 🏗️ 技術架構
 
@@ -27,11 +29,7 @@
 ┌──────────▼──────────────┐
 │  Express + tRPC Server  │  ← 後端 (Node.js)
 │  Drizzle ORM            │
-└──────────┬──────────────┘
-           │ HTTP
-┌──────────▼──────────────┐
-│  Python Flask           │  ← 股價微服務 (yfinance)
-│  yfinance + pandas      │
+│  本機磁碟媒體儲存 + 排程  │  ← /uploads，24h 自動銷毀
 └──────────┬──────────────┘
            │
 ┌──────────▼──────────────┐
@@ -45,76 +43,58 @@
 
 - Node.js ≥ 18
 - pnpm ≥ 10
-- Python ≥ 3.10
 - MySQL ≥ 8.0（或 Docker）
 
 ### 一鍵安裝
 
 ```bash
-git clone https://github.com/w08130220-a11y/stockdashborad.git
-cd stockdashborad
 chmod +x setup-local.sh
 ./setup-local.sh
 ```
 
-腳本會自動：安裝 Node/Python 依賴、建立 `.env`、設定 MySQL、執行 DB migration。
+腳本會：安裝依賴、建立 `.env`、用 Docker 起 MySQL、執行 `pnpm db:push` 建表。
 
-### 啟動（兩個終端機）
+### 啟動
 
 ```bash
-# 終端機 1 — 股價服務
-source venv/bin/activate
-python3 server/yfinance_service.py
-
-# 終端機 2 — Web 服務
 pnpm dev
 ```
 
-瀏覽器打開 **http://localhost:3000**
+瀏覽器打開 **http://localhost:3000**，允許定位權限即可看到附近的分享。
 
-> 自動登入管理員帳號，不需要輸入帳密。
+> 開發環境自動登入，第一次進入會引導你建立個人介面。
 
 ## 📁 專案結構
 
 ```
-├── client/src/           # React 前端
-│   ├── pages/Home.tsx    # 主頁面（持股/觀察/停損/資金流水）
-│   ├── components/       # UI 元件 (Paywall, Sparkline, etc.)
-│   ├── contexts/         # Theme, I18n, Subscription providers
-│   └── lib/              # trpc client, i18n, stockUtils
-├── server/               # Express + tRPC 後端
-│   ├── _core/            # 核心框架 (context, auth, env, vite)
-│   ├── routers.ts        # tRPC API 路由
-│   ├── stockService.ts   # 股價服務 (→ Python yfinance)
-│   ├── scheduler.ts      # 每日定時更新
-│   ├── subscriptionRouter.ts
-│   ├── webhooks.ts       # Stripe/Apple/Google webhook 預留
-│   ├── db.ts             # Drizzle ORM 資料庫操作
-│   └── yfinance_service.py  # Python 股價微服務
-├── shared/               # 前後端共用型別
-│   ├── plans.ts          # 訂閱方案定義 + LAUNCH_MODE
-│   └── const.ts
-├── drizzle/              # DB schema + migration SQL
-│   └── schema.ts
-└── setup-local.sh        # 一鍵安裝腳本
+├── client/src/
+│   ├── pages/
+│   │   ├── Home.tsx        # 主畫面（附近 / 追蹤 / 雷達 / 我）
+│   │   ├── CreatePost.tsx  # 發佈圖片 / 10 秒影片
+│   │   └── UserProfile.tsx # 別人的個人頁（追蹤入口）
+│   ├── components/
+│   │   ├── Onboarding.tsx  # 建立個人介面
+│   │   ├── PostCard.tsx    # 貼文卡片
+│   │   ├── ReactionBar.tsx # 一鍵表情回應
+│   │   ├── Countdown.tsx   # 消失倒數
+│   │   └── BottomNav.tsx   # 底部導航
+│   ├── hooks/useGeolocation.ts
+│   └── lib/media.ts        # 圖片壓縮、影片長度量測
+├── server/
+│   ├── routers.ts          # tRPC API（profile / post / follow）
+│   ├── db.ts               # Drizzle 資料庫操作
+│   ├── media.ts            # 本機磁碟媒體儲存
+│   └── scheduler.ts        # 24 小時自動銷毀排程
+├── shared/geo.ts           # Haversine 距離 / bounding box（前後端共用）
+└── drizzle/schema.ts       # users / profiles / posts / reactions / encounters / follows
 ```
-
-## 💎 訂閱系統
-
-| 方案 | 價格 | 持股上限 | 觀察清單 | 價格警報 | 特色功能 |
-|------|------|----------|----------|----------|----------|
-| Free | $0 | 5 | 3 | 1 | 基本追蹤 |
-| Pro | $9.99/月 | 30 | 20 | 10 | 移動停損、Excel 匯入、多幣別 |
-| Premium | $19.99/月 | ∞ | ∞ | ∞ | AI 分析、PDF 匯出、優先支援 |
-
-> 目前 `LAUNCH_MODE = true`，所有人免費享有 Pro 功能。
 
 ## ⚙️ 環境變數
 
 ```env
-DATABASE_URL=mysql://user:pass@localhost:3306/stock_dashboard
+DATABASE_URL=mysql://user:pass@localhost:3306/blip
 JWT_SECRET=your-secret-key
-YFINANCE_API_URL=http://localhost:5001
+VITE_APP_ID=blip
 OWNER_OPEN_ID=local-owner
 ```
 

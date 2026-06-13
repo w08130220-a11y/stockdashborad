@@ -6,8 +6,8 @@ import { createExpressMiddleware } from "@trpc/server/adapters/express";
 import { appRouter } from "../routers";
 import { createContext } from "./context";
 import { serveStatic, setupVite } from "./vite";
-import { startScheduler } from "../scheduler";
-import { getAllTrackedSymbols } from "../db";
+import { startCleanupScheduler } from "../scheduler";
+import { UPLOAD_DIR, ensureUploadDir } from "../media";
 
 function isPortAvailable(port: number): Promise<boolean> {
   return new Promise(resolve => {
@@ -30,6 +30,10 @@ async function startServer() {
   const server = createServer(app);
   app.use(express.json({ limit: "50mb" }));
   app.use(express.urlencoded({ limit: "50mb", extended: true }));
+
+  // 媒體檔靜態服務（限時圖片/影片）
+  await ensureUploadDir();
+  app.use("/uploads", express.static(UPLOAD_DIR, { maxAge: "1h" }));
 
   // tRPC API
   app.use(
@@ -58,11 +62,8 @@ async function startServer() {
   server.listen(port, () => {
     console.log(`Server running on http://localhost:${port}/`);
 
-    // Start daily price update scheduler
-    startScheduler(async () => {
-      try { return await getAllTrackedSymbols(); }
-      catch { return []; }
-    });
+    // 啟動 24 小時自動銷毀排程
+    startCleanupScheduler();
   });
 }
 

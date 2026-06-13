@@ -1,25 +1,22 @@
-import { eq, and } from "drizzle-orm";
+import { and, desc, eq, gt, lt, inArray, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/mysql2";
 import {
   InsertUser,
   users,
-  holdings,
-  watchlist,
-  cashFlows,
-  trailingStops,
-  cashBalance,
-  priceAlerts,
-  stockCache,
-  type Holding,
-  type InsertHolding,
-  type WatchlistItem,
-  type InsertWatchlistItem,
-  type CashFlow,
-  type InsertCashFlow,
-  type InsertTrailingStop,
-  type PriceAlert,
-  type InsertPriceAlert,
+  profiles,
+  posts,
+  reactions,
+  encounters,
+  follows,
+  type User,
+  type Profile,
+  type InsertProfile,
+  type Post,
+  type InsertPost,
+  type Reaction,
 } from "../drizzle/schema";
+
+export type { Post } from "../drizzle/schema";
 import { ENV } from "./_core/env";
 
 let _db: ReturnType<typeof drizzle> | null = null;
@@ -58,286 +55,234 @@ export async function upsertUser(user: InsertUser): Promise<void> {
   await db.insert(users).values(values).onDuplicateKeyUpdate({ set: updateSet });
 }
 
-export async function getUserByOpenId(openId: string) {
+export async function getUserByOpenId(openId: string): Promise<User | undefined> {
   const db = await getDb();
   if (!db) return undefined;
-  const result = await db.select().from(users).where(eq(users.openId, openId)).limit(1);
-  return result[0];
+  const rows = await db.select().from(users).where(eq(users.openId, openId)).limit(1);
+  return rows[0];
 }
 
-// ─── Holdings ───
-export async function getHoldings(userId: number): Promise<Holding[]> {
+export async function getUsersByIds(ids: number[]): Promise<User[]> {
+  const db = await getDb();
+  if (!db || ids.length === 0) return [];
+  return db.select().from(users).where(inArray(users.id, ids));
+}
+
+// ─── Profiles ───
+export async function getProfileByUserId(userId: number): Promise<Profile | undefined> {
+  const db = await getDb();
+  if (!db) return undefined;
+  const rows = await db.select().from(profiles).where(eq(profiles.userId, userId)).limit(1);
+  return rows[0];
+}
+
+export async function getProfilesByUserIds(userIds: number[]): Promise<Profile[]> {
+  const db = await getDb();
+  if (!db || userIds.length === 0) return [];
+  return db.select().from(profiles).where(inArray(profiles.userId, userIds));
+}
+
+export async function isUsernameTaken(username: string, exceptUserId?: number): Promise<boolean> {
+  const db = await getDb();
+  if (!db) return false;
+  const rows = await db.select({ userId: profiles.userId }).from(profiles).where(eq(profiles.username, username)).limit(1);
+  if (rows.length === 0) return false;
+  return exceptUserId === undefined || rows[0].userId !== exceptUserId;
+}
+
+export async function upsertProfile(p: InsertProfile): Promise<void> {
+  const db = await getDb();
+  if (!db) return;
+  const { userId, ...rest } = p;
+  await db.insert(profiles).values(p).onDuplicateKeyUpdate({ set: rest });
+}
+
+// ─── Streak ───
+export async function bumpStreak(userId: number): Promise<void> {
+  const db = await getDb();
+  if (!db) return;
+  const profile = await getProfileByUserId(userId);
+  if (!profile) return;
+  const today = new Date().toISOString().slice(0, 10);
+  if (profile.lastPostDate === today) return; // already counted today
+  const yesterday = new Date(Date.now() - 86_400_000).toISOString().slice(0, 10);
+  const nextStreak = profile.lastPostDate === yesterday ? profile.streakCount + 1 : 1;
+  await db.update(profiles)
+    .set({ streakCount: nextStreak, lastPostDate: today })
+    .where(eq(profiles.userId, userId));
+}
+
+// ─── Posts ───
+export async function createPost(p: InsertPost): Promise<number> {
+  const db = await getDb();
+  if (!db) throw new Error("Database unavailable");
+  const result = await db.insert(posts).values(p);
+  // mysql2 returns insertId on the result header
+  return (result as unknown as [{ insertId: number }])[0].insertId;
+}
+
+export async function getPostById(id: number): Promise<Post | undefined> {
+  const db = await getDb();
+  if (!db) return undefined;
+  const rows = await db.select().from(posts).where(eq(posts.id, id)).limit(1);
+  return rows[0];
+}
+
+// Active posts (not archived, not expired) — used for nearby feed (bounding box pre-filter)
+export async function getActivePostsInBox(box: { minLat: number; maxLat: number; minLng: number; maxLng: number }): Promise<Post[]> {
   const db = await getDb();
   if (!db) return [];
-  return db.select().from(holdings).where(eq(holdings.userId, userId));
+  return db.select().from(posts).where(and(
+    eq(posts.archived, false),
+    gt(posts.expiresAt, new Date()),
+    sql`${posts.lat} BETWEEN ${box.minLat} AND ${box.maxLat}`,
+    sql`${posts.lng} BETWEEN ${box.minLng} AND ${box.maxLng}`,
+  )).orderBy(desc(posts.createdAt)).limit(200);
 }
 
-export async function upsertHolding(data: InsertHolding & { id?: number }) {
+// Active posts from a set of authors (following feed) — distance independent
+export async function getActivePostsByAuthors(authorIds: number[]): Promise<Post[]> {
   const db = await getDb();
-  if (!db) return;
-  if (data.id) {
-    await db.update(holdings).set({
-      symbol: data.symbol, name: data.name, shares: data.shares,
-      avgCost: data.avgCost, sector: data.sector,
-      market: data.market || "US", currency: data.currency || "USD",
-    }).where(and(eq(holdings.id, data.id), eq(holdings.userId, data.userId)));
-  } else {
-    await db.insert(holdings).values({
-      ...data,
-      market: data.market || "US",
-      currency: data.currency || "USD",
-    }).onDuplicateKeyUpdate({
-      set: {
-        name: data.name, shares: data.shares, avgCost: data.avgCost,
-        sector: data.sector, market: data.market || "US", currency: data.currency || "USD",
-      },
-    });
-  }
+  if (!db || authorIds.length === 0) return [];
+  return db.select().from(posts).where(and(
+    inArray(posts.userId, authorIds),
+    eq(posts.archived, false),
+    gt(posts.expiresAt, new Date()),
+  )).orderBy(desc(posts.createdAt)).limit(200);
 }
 
-export async function deleteHolding(id: number, userId: number) {
-  const db = await getDb();
-  if (!db) return;
-  await db.delete(holdings).where(and(eq(holdings.id, id), eq(holdings.userId, userId)));
-}
-
-// ─── Watchlist ───
-export async function getWatchlist(userId: number): Promise<WatchlistItem[]> {
+// Posts authored by a single user (own profile: active + archived/saved)
+export async function getPostsByUser(userId: number, includeArchived: boolean): Promise<Post[]> {
   const db = await getDb();
   if (!db) return [];
-  return db.select().from(watchlist).where(eq(watchlist.userId, userId));
+  const conds = includeArchived
+    ? eq(posts.userId, userId)
+    : and(eq(posts.userId, userId), eq(posts.archived, false), gt(posts.expiresAt, new Date()));
+  return db.select().from(posts).where(conds).orderBy(desc(posts.createdAt)).limit(200);
 }
 
-export async function addWatchlistItem(data: InsertWatchlistItem) {
+export async function setPostSaved(id: number, userId: number, saved: boolean): Promise<void> {
   const db = await getDb();
   if (!db) return;
-  await db.insert(watchlist).values({
-    ...data,
-    market: data.market || "US",
-    currency: data.currency || "USD",
-  }).onDuplicateKeyUpdate({
-    set: { symbol: data.symbol, market: data.market || "US", currency: data.currency || "USD" },
-  });
+  await db.update(posts).set({ savedByOwner: saved }).where(and(eq(posts.id, id), eq(posts.userId, userId)));
 }
 
-export async function deleteWatchlistItem(id: number, userId: number) {
+export async function deletePost(id: number, userId: number): Promise<void> {
   const db = await getDb();
   if (!db) return;
-  await db.delete(watchlist).where(and(eq(watchlist.id, id), eq(watchlist.userId, userId)));
+  await db.delete(posts).where(and(eq(posts.id, id), eq(posts.userId, userId)));
 }
 
-// ─── Cash Flows ───
-export async function getCashFlows(userId: number): Promise<CashFlow[]> {
+// Cleanup: expired posts. Saved ones → archived; others → deleted (returns deleted media urls).
+export async function reapExpiredPosts(): Promise<string[]> {
   const db = await getDb();
   if (!db) return [];
-  return db.select().from(cashFlows).where(eq(cashFlows.userId, userId));
+  const now = new Date();
+  // Archive saved-but-expired posts
+  await db.update(posts).set({ archived: true }).where(and(
+    lt(posts.expiresAt, now),
+    eq(posts.savedByOwner, true),
+    eq(posts.archived, false),
+  ));
+  // Collect & delete unsaved expired posts
+  const doomed = await db.select().from(posts).where(and(
+    lt(posts.expiresAt, now),
+    eq(posts.savedByOwner, false),
+  ));
+  if (doomed.length === 0) return [];
+  const ids = doomed.map((p) => p.id);
+  await db.delete(reactions).where(inArray(reactions.postId, ids));
+  await db.delete(posts).where(inArray(posts.id, ids));
+  return doomed.map((p) => p.mediaUrl);
 }
 
-export async function upsertCashFlow(data: InsertCashFlow & { id?: number }) {
+// ─── Reactions ───
+export async function setReaction(postId: number, userId: number, emoji: string): Promise<void> {
   const db = await getDb();
   if (!db) return;
-  if (data.id) {
-    await db.update(cashFlows).set({
-      date: data.date, inflow: data.inflow, outflow: data.outflow, category: data.category, note: data.note,
-    }).where(and(eq(cashFlows.id, data.id), eq(cashFlows.userId, data.userId)));
-  } else {
-    await db.insert(cashFlows).values(data);
-  }
+  await db.insert(reactions).values({ postId, userId, emoji })
+    .onDuplicateKeyUpdate({ set: { emoji } });
 }
 
-export async function deleteCashFlow(id: number, userId: number) {
+export async function removeReaction(postId: number, userId: number): Promise<void> {
   const db = await getDb();
   if (!db) return;
-  await db.delete(cashFlows).where(and(eq(cashFlows.id, id), eq(cashFlows.userId, userId)));
+  await db.delete(reactions).where(and(eq(reactions.postId, postId), eq(reactions.userId, userId)));
 }
 
-export async function bulkReplaceCashFlows(userId: number, rows: Array<{ date: string; inflow: string; outflow: string; category?: string }>) {
+export async function getReactionsForPosts(postIds: number[]): Promise<Reaction[]> {
   const db = await getDb();
-  if (!db) return;
-  await db.delete(cashFlows).where(eq(cashFlows.userId, userId));
-  if (rows.length > 0) {
-    await db.insert(cashFlows).values(rows.map((r) => ({ userId, date: r.date, inflow: r.inflow, outflow: r.outflow, category: r.category })));
-  }
+  if (!db || postIds.length === 0) return [];
+  return db.select().from(reactions).where(inArray(reactions.postId, postIds));
 }
 
-// ─── Trailing Stops ───
-export async function getTrailingStops(userId: number) {
+// ─── Encounters ───
+export async function recordEncounters(viewerId: number, authorIds: number[]): Promise<void> {
+  const db = await getDb();
+  if (!db || authorIds.length === 0) return;
+  const unique = Array.from(new Set(authorIds)).filter((a) => a !== viewerId);
+  if (unique.length === 0) return;
+  await db.insert(encounters)
+    .values(unique.map((authorId) => ({ viewerId, authorId })))
+    .onDuplicateKeyUpdate({ set: { authorId: sql`authorId` } }); // no-op on conflict
+}
+
+export async function hasEncountered(viewerId: number, authorId: number): Promise<boolean> {
+  const db = await getDb();
+  if (!db) return false;
+  const rows = await db.select({ id: encounters.id }).from(encounters)
+    .where(and(eq(encounters.viewerId, viewerId), eq(encounters.authorId, authorId))).limit(1);
+  return rows.length > 0;
+}
+
+export async function getEncounteredAuthorIds(viewerId: number): Promise<number[]> {
   const db = await getDb();
   if (!db) return [];
-  return db.select().from(trailingStops).where(eq(trailingStops.userId, userId));
+  const rows = await db.select({ authorId: encounters.authorId }).from(encounters)
+    .where(eq(encounters.viewerId, viewerId));
+  return rows.map((r) => r.authorId);
 }
 
-export async function upsertTrailingStop(data: InsertTrailingStop) {
+// ─── Follows ───
+export async function addFollow(followerId: number, followeeId: number): Promise<void> {
+  const db = await getDb();
+  if (!db || followerId === followeeId) return;
+  await db.insert(follows).values({ followerId, followeeId })
+    .onDuplicateKeyUpdate({ set: { followeeId: sql`followeeId` } });
+}
+
+export async function removeFollow(followerId: number, followeeId: number): Promise<void> {
   const db = await getDb();
   if (!db) return;
-  await db.insert(trailingStops).values(data).onDuplicateKeyUpdate({
-    set: {
-      trailPct: data.trailPct,
-      ...(data.takeProfitPrice !== undefined ? { takeProfitPrice: data.takeProfitPrice } : {}),
-    },
-  });
+  await db.delete(follows).where(and(eq(follows.followerId, followerId), eq(follows.followeeId, followeeId)));
 }
 
-// ─── Cash Balance ───
-export async function getCashBalance(userId: number): Promise<number> {
+export async function getFollowingIds(followerId: number): Promise<number[]> {
+  const db = await getDb();
+  if (!db) return [];
+  const rows = await db.select({ followeeId: follows.followeeId }).from(follows)
+    .where(eq(follows.followerId, followerId));
+  return rows.map((r) => r.followeeId);
+}
+
+export async function getFollowerCount(userId: number): Promise<number> {
   const db = await getDb();
   if (!db) return 0;
-  const result = await db.select().from(cashBalance).where(eq(cashBalance.userId, userId)).limit(1);
-  return result[0] ? parseFloat(String(result[0].balance)) : 0;
+  const rows = await db.select({ c: sql<number>`count(*)` }).from(follows).where(eq(follows.followeeId, userId));
+  return Number(rows[0]?.c ?? 0);
 }
 
-export async function setCashBalance(userId: number, balance: number) {
+export async function getFollowingCount(userId: number): Promise<number> {
   const db = await getDb();
-  if (!db) return;
-  await db.insert(cashBalance).values({ userId, balance: String(balance) })
-    .onDuplicateKeyUpdate({ set: { balance: String(balance) } });
+  if (!db) return 0;
+  const rows = await db.select({ c: sql<number>`count(*)` }).from(follows).where(eq(follows.followerId, userId));
+  return Number(rows[0]?.c ?? 0);
 }
 
-// ─── Price Alerts ───
-export async function getPriceAlerts(userId: number): Promise<PriceAlert[]> {
+export async function isFollowing(followerId: number, followeeId: number): Promise<boolean> {
   const db = await getDb();
-  if (!db) return [];
-  return db.select().from(priceAlerts).where(eq(priceAlerts.userId, userId));
-}
-
-export async function getActivePriceAlerts(): Promise<PriceAlert[]> {
-  const db = await getDb();
-  if (!db) return [];
-  return db.select().from(priceAlerts).where(eq(priceAlerts.active, true));
-}
-
-export async function createPriceAlert(data: InsertPriceAlert) {
-  const db = await getDb();
-  if (!db) return;
-  await db.insert(priceAlerts).values(data);
-}
-
-export async function deletePriceAlert(id: number, userId: number) {
-  const db = await getDb();
-  if (!db) return;
-  await db.delete(priceAlerts).where(and(eq(priceAlerts.id, id), eq(priceAlerts.userId, userId)));
-}
-
-export async function markAlertTriggered(id: number) {
-  const db = await getDb();
-  if (!db) return;
-  await db.update(priceAlerts).set({
-    triggered: true,
-    triggeredAt: new Date(),
-    active: false,
-  }).where(eq(priceAlerts.id, id));
-}
-
-export async function togglePriceAlert(id: number, userId: number, active: boolean) {
-  const db = await getDb();
-  if (!db) return;
-  await db.update(priceAlerts).set({ active }).where(and(eq(priceAlerts.id, id), eq(priceAlerts.userId, userId)));
-}
-
-// ─── Stock Cache (persistent price cache) ───
-export async function getStockCacheAll(): Promise<Array<{ symbol: string; data: string; updatedAt: Date }>> {
-  const db = await getDb();
-  if (!db) return [];
-  return db.select().from(stockCache);
-}
-
-export async function upsertStockCache(symbol: string, data: string) {
-  const db = await getDb();
-  if (!db) return;
-  await db.insert(stockCache).values({ symbol, data })
-    .onDuplicateKeyUpdate({ set: { data, updatedAt: new Date() } });
-}
-
-export async function batchUpsertStockCache(entries: Array<{ symbol: string; data: string }>) {
-  const db = await getDb();
-  if (!db) return;
-  for (const entry of entries) {
-    await db.insert(stockCache).values(entry)
-      .onDuplicateKeyUpdate({ set: { data: entry.data, updatedAt: new Date() } });
-  }
-}
-
-// ─── Get all unique symbols across all users (for scheduler) ───
-export async function getAllTrackedSymbols(): Promise<string[]> {
-  const db = await getDb();
-  if (!db) return [];
-  const holdingRows = await db.select({ symbol: holdings.symbol }).from(holdings);
-  const watchlistRows = await db.select({ symbol: watchlist.symbol }).from(watchlist);
-  const allSymbols = new Set([
-    ...holdingRows.map(r => r.symbol),
-    ...watchlistRows.map(r => r.symbol),
-  ]);
-  return Array.from(allSymbols);
-}
-
-// ─── Subscriptions ───
-import { subscriptions, paymentHistory } from "../drizzle/schema";
-
-export async function getUserSubscription(userId: number) {
-  const db = await getDb();
-  if (!db) return null;
-  const rows = await db.select().from(subscriptions).where(eq(subscriptions.userId, userId)).limit(1);
-  return rows[0] || null;
-}
-
-export async function upsertSubscription(userId: number, data: {
-  planId: "free" | "pro" | "premium";
-  status: "active" | "trialing" | "past_due" | "canceled" | "expired" | "paused";
-  billingCycle?: "monthly" | "yearly";
-  paymentProvider?: "stripe" | "apple" | "google" | "manual";
-  providerSubId?: string;
-  providerCustomerId?: string;
-  currentPeriodStart?: Date;
-  currentPeriodEnd?: Date;
-  cancelAtPeriodEnd?: boolean;
-  trialEndDate?: Date;
-}) {
-  const db = await getDb();
-  if (!db) return;
-  await db.insert(subscriptions).values({
-    userId,
-    ...data,
-  }).onDuplicateKeyUpdate({
-    set: {
-      planId: data.planId,
-      status: data.status,
-      billingCycle: data.billingCycle,
-      paymentProvider: data.paymentProvider,
-      providerSubId: data.providerSubId,
-      providerCustomerId: data.providerCustomerId,
-      currentPeriodStart: data.currentPeriodStart,
-      currentPeriodEnd: data.currentPeriodEnd,
-      cancelAtPeriodEnd: data.cancelAtPeriodEnd ?? false,
-      trialEndDate: data.trialEndDate,
-    },
-  });
-}
-
-export async function cancelSubscription(userId: number) {
-  const db = await getDb();
-  if (!db) return;
-  await db.update(subscriptions).set({
-    cancelAtPeriodEnd: true,
-  }).where(eq(subscriptions.userId, userId));
-}
-
-export async function addPaymentRecord(data: {
-  userId: number;
-  subscriptionId?: number;
-  amount: string;
-  currency: string;
-  status: "succeeded" | "pending" | "failed" | "refunded";
-  paymentProvider?: "stripe" | "apple" | "google" | "manual";
-  providerPaymentId?: string;
-  description?: string;
-}) {
-  const db = await getDb();
-  if (!db) return;
-  await db.insert(paymentHistory).values(data);
-}
-
-export async function getPaymentHistory(userId: number) {
-  const db = await getDb();
-  if (!db) return [];
-  return db.select().from(paymentHistory).where(eq(paymentHistory.userId, userId));
+  if (!db) return false;
+  const rows = await db.select({ id: follows.id }).from(follows)
+    .where(and(eq(follows.followerId, followerId), eq(follows.followeeId, followeeId))).limit(1);
+  return rows.length > 0;
 }

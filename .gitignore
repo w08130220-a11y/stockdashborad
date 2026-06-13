@@ -118,3 +118,6 @@ __pycache__/
 
 # Local dev
 *.tar.gz
+
+# Uploaded media (限時，本機儲存)
+/uploads/

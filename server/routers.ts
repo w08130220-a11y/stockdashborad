@@ -1,80 +1,88 @@
 import { z } from "zod";
+import { TRPCError } from "@trpc/server";
 import { COOKIE_NAME } from "@shared/const";
 import { getSessionCookieOptions } from "./_core/cookies";
 import { systemRouter } from "./_core/systemRouter";
 import { publicProcedure, protectedProcedure, router } from "./_core/trpc";
+import { boundingBox, distanceKm, isValidCoord, NEARBY_RADIUS_KM } from "@shared/geo";
+import { saveDataUrl } from "./media";
 import {
-  getHoldings, upsertHolding, deleteHolding,
-  getWatchlist, addWatchlistItem, deleteWatchlistItem,
-  getCashFlows, upsertCashFlow, deleteCashFlow, bulkReplaceCashFlows,
-  getTrailingStops, upsertTrailingStop,
-  getCashBalance, setCashBalance,
-  getPriceAlerts, createPriceAlert, deletePriceAlert, markAlertTriggered, togglePriceAlert, getActivePriceAlerts,
+  getProfileByUserId, getProfilesByUserIds, upsertProfile, isUsernameTaken, bumpStreak,
+  createPost, getPostById, getActivePostsInBox, getActivePostsByAuthors, getPostsByUser,
+  setPostSaved, deletePost,
+  setReaction, removeReaction, getReactionsForPosts,
+  recordEncounters, hasEncountered,
+  addFollow, removeFollow, getFollowingIds, getFollowerCount, getFollowingCount, isFollowing,
+  type Post,
 } from "./db";
 
-import { batchGetFullData, lookupStock, batchGetQuotes, getCacheStats, flushCacheToDB } from "./stockService";
-import { runDailyUpdate } from "./scheduler";
-import { subscriptionRouter } from "./subscriptionRouter";
+const POST_TTL_MS = 24 * 60 * 60 * 1000; // 24 小時後銷毀
+const MAX_IMAGE_BYTES = 8 * 1024 * 1024; // 8MB
+const MAX_VIDEO_BYTES = 24 * 1024 * 1024; // 24MB（約 10 秒手機影片）
+const ALLOWED_EMOJI = ["🔥", "❤️", "😂", "👀", "😮", "💯"];
 
-// Helper: detect market from symbol
-function detectMarket(symbol: string): { market: "US" | "TW"; currency: "USD" | "TWD" } {
-  const upper = symbol.toUpperCase();
-  if (upper.endsWith(".TW") || upper.endsWith(".TWO")) {
-    return { market: "TW", currency: "TWD" };
+type AuthorCard = {
+  userId: number;
+  username: string;
+  displayName: string;
+  avatarUrl: string | null;
+  themeColor: string;
+};
+
+// 把 Post[] 組裝成前端用的 DTO（含作者資料、表情統計、我的表情）
+async function assemblePosts(rows: Post[], viewerId: number, origin?: { lat: number; lng: number }) {
+  if (rows.length === 0) return [];
+  const authorIds = Array.from(new Set(rows.map((r) => r.userId)));
+  const postIds = rows.map((r) => r.id);
+  const [profiles, reactions] = await Promise.all([
+    getProfilesByUserIds(authorIds),
+    getReactionsForPosts(postIds),
+  ]);
+  const profileMap = new Map<number, AuthorCard>();
+  for (const p of profiles) {
+    profileMap.set(p.userId, {
+      userId: p.userId,
+      username: p.username,
+      displayName: p.displayName,
+      avatarUrl: p.avatarUrl ?? null,
+      themeColor: p.themeColor,
+    });
   }
-  const base = upper.replace(/\.TW$|\.TWO$/i, "");
-  if (/^\d{4,6}$/.test(base)) {
-    return { market: "TW", currency: "TWD" };
+  // reactions 統計
+  const counts = new Map<number, Record<string, number>>();
+  const mine = new Map<number, string>();
+  for (const r of reactions) {
+    const c = counts.get(r.postId) ?? {};
+    c[r.emoji] = (c[r.emoji] ?? 0) + 1;
+    counts.set(r.postId, c);
+    if (r.userId === viewerId) mine.set(r.postId, r.emoji);
   }
-  return { market: "US", currency: "USD" };
+  return rows.map((r) => ({
+    id: r.id,
+    mediaType: r.mediaType,
+    mediaUrl: r.mediaUrl,
+    caption: r.caption ?? "",
+    createdAt: r.createdAt,
+    expiresAt: r.expiresAt,
+    savedByOwner: r.savedByOwner,
+    archived: r.archived,
+    mine: r.userId === viewerId,
+    author: profileMap.get(r.userId) ?? {
+      userId: r.userId, username: "unknown", displayName: "Someone", avatarUrl: null, themeColor: "#FF5A5F",
+    },
+    reactions: counts.get(r.id) ?? {},
+    myReaction: mine.get(r.id) ?? null,
+    distanceKm: origin ? Math.round(distanceKm(origin, { lat: r.lat, lng: r.lng }) * 10) / 10 : null,
+    lat: r.lat,
+    lng: r.lng,
+  }));
 }
 
-// Helper: ensure symbol has .TW suffix for Taiwan stocks
-function normalizeSymbol(symbol: string): string {
-  const upper = symbol.toUpperCase().trim();
-  if (upper.endsWith(".TW") || upper.endsWith(".TWO")) return upper;
-  const base = upper.replace(/\.TW$|\.TWO$/i, "");
-  if (/^\d{4,6}$/.test(base)) return `${base}.TW`;
-  return upper;
-}
-
-// ─── Default seed data ───
-const DEFAULT_HOLDINGS = [
-  { symbol: "AAPL", name: "Apple Inc.", shares: "50", avgCost: "178.50", sector: "Technology", market: "US" as const, currency: "USD" as const },
-  { symbol: "MSFT", name: "Microsoft Corp.", shares: "30", avgCost: "372.00", sector: "Technology", market: "US" as const, currency: "USD" as const },
-  { symbol: "GOOGL", name: "Alphabet Inc.", shares: "20", avgCost: "141.80", sector: "Technology", market: "US" as const, currency: "USD" as const },
-  { symbol: "NVDA", name: "NVIDIA Corp.", shares: "40", avgCost: "480.20", sector: "Technology", market: "US" as const, currency: "USD" as const },
-  { symbol: "2330.TW", name: "台積電", shares: "1000", avgCost: "580.00", sector: "半導體", market: "TW" as const, currency: "TWD" as const },
-  { symbol: "2317.TW", name: "鴻海", shares: "2000", avgCost: "105.00", sector: "電子", market: "TW" as const, currency: "TWD" as const },
-  { symbol: "0050.TW", name: "元大台灣50", shares: "500", avgCost: "135.00", sector: "ETF", market: "TW" as const, currency: "TWD" as const },
-  { symbol: "JPM", name: "JPMorgan Chase", shares: "35", avgCost: "195.60", sector: "Financial Services", market: "US" as const, currency: "USD" as const },
-];
-
-const DEFAULT_WATCHLIST = [
-  { symbol: "TSLA", name: "Tesla Inc.", sector: "Consumer Cyclical", market: "US" as const, currency: "USD" as const },
-  { symbol: "META", name: "Meta Platforms", sector: "Technology", market: "US" as const, currency: "USD" as const },
-  { symbol: "2454.TW", name: "聯發科", sector: "半導體", market: "TW" as const, currency: "TWD" as const },
-  { symbol: "2603.TW", name: "長榮", sector: "航運", market: "TW" as const, currency: "TWD" as const },
-];
-
-const DEFAULT_CASHFLOWS = [
-  { date: "2025-01-05", inflow: "8000", outflow: "0", category: "薪資" },
-  { date: "2025-01-15", inflow: "0", outflow: "3200", category: "生活" },
-  { date: "2025-02-05", inflow: "8000", outflow: "0", category: "薪資" },
-  { date: "2025-02-15", inflow: "0", outflow: "2800", category: "生活" },
-  { date: "2025-03-05", inflow: "8500", outflow: "0", category: "薪資" },
-  { date: "2025-03-15", inflow: "0", outflow: "4100", category: "生活" },
-  { date: "2025-04-05", inflow: "8000", outflow: "0", category: "薪資" },
-  { date: "2025-04-15", inflow: "0", outflow: "3600", category: "生活" },
-  { date: "2025-05-05", inflow: "9200", outflow: "0", category: "薪資" },
-  { date: "2025-05-15", inflow: "0", outflow: "3900", category: "生活" },
-  { date: "2025-06-05", inflow: "8000", outflow: "0", category: "薪資" },
-  { date: "2025-06-15", inflow: "0", outflow: "2500", category: "生活" },
-];
+const usernameSchema = z.string().trim().min(3).max(32).regex(/^[a-zA-Z0-9_.]+$/, "只能用英數字、底線、句點");
 
 export const appRouter = router({
   system: systemRouter,
-  subscription: subscriptionRouter,
+
   auth: router({
     me: publicProcedure.query((opts) => opts.ctx.user),
     logout: publicProcedure.mutation(({ ctx }) => {
@@ -84,400 +92,208 @@ export const appRouter = router({
     }),
   }),
 
-  // ─── Stock Quotes (via Twelve Data API + yfinance fallback) ─── 
-  stock: router({
-    quotes: protectedProcedure
-      .input(z.object({ symbols: z.array(z.string()) }))
-      .query(async ({ input }) => {
-        if (input.symbols.length === 0) return [];
-        return batchGetQuotes(input.symbols);
-      }),
-
-    fullData: protectedProcedure
-      .input(z.object({ symbols: z.array(z.string()) }))
-      .query(async ({ input }) => {
-        if (input.symbols.length === 0) return [];
-        return batchGetFullData(input.symbols);
-      }),
-
-    singleFull: protectedProcedure
-      .input(z.object({ symbol: z.string() }))
-      .query(async ({ input }) => {
-        const results = await batchGetFullData([input.symbol]);
-        return results[0] || null;
-      }),
-
-    // Lookup stock info (name, sector, price) for adding new holdings
-    lookup: protectedProcedure
-      .input(z.object({ symbol: z.string() }))
-      .query(async ({ input }) => {
-        return lookupStock(input.symbol);
-      }),
-
-    cacheStats: protectedProcedure.query(() => {
-      return getCacheStats();
+  // ─── 個人專屬介面 ───
+  profile: router({
+    // 我的 profile（沒有則回傳 null → 前端帶去 onboarding）
+    me: protectedProcedure.query(async ({ ctx }) => {
+      const p = await getProfileByUserId(ctx.user.id);
+      if (!p) return null;
+      const [followers, following] = await Promise.all([
+        getFollowerCount(ctx.user.id),
+        getFollowingCount(ctx.user.id),
+      ]);
+      return { ...p, followers, following };
     }),
 
-    // Manual refresh: force re-fetch all symbols (bypasses cache)
-    forceRefresh: protectedProcedure
-      .input(z.object({ symbols: z.array(z.string()) }))
-      .mutation(async ({ input }) => {
-        const result = await runDailyUpdate(input.symbols);
-        return result;
+    checkUsername: protectedProcedure
+      .input(z.object({ username: usernameSchema }))
+      .query(async ({ ctx, input }) => {
+        const taken = await isUsernameTaken(input.username, ctx.user.id);
+        return { available: !taken };
       }),
 
-    // Flush in-memory cache to database for persistence
-    flushCache: protectedProcedure.mutation(async () => {
-      const count = await flushCacheToDB();
-      return { flushed: count };
-    }),
-  }),
-
-  // ─── Holdings ───
-  holdings: router({
-    list: protectedProcedure.query(async ({ ctx }) => {
-      let rows = await getHoldings(ctx.user.id);
-      if (rows.length === 0) {
-        for (const h of DEFAULT_HOLDINGS) {
-          await upsertHolding({ userId: ctx.user.id, ...h });
-        }
-        rows = await getHoldings(ctx.user.id);
-      }
-      return rows.map((r) => ({
-        id: r.id,
-        symbol: r.symbol,
-        name: r.name,
-        shares: parseFloat(String(r.shares)),
-        avgCost: parseFloat(String(r.avgCost)),
-        sector: r.sector || "Other",
-        market: (r.market || "US") as "US" | "TW",
-        currency: (r.currency || "USD") as "USD" | "TWD",
-      }));
-    }),
-
-    upsert: protectedProcedure
+    // 建立 / 更新個人介面
+    save: protectedProcedure
       .input(z.object({
-        id: z.number().optional(),
-        symbol: z.string().min(1),
-        name: z.string().min(1),
-        shares: z.number().positive(),
-        avgCost: z.number().positive(),
-        sector: z.string().default("Other"),
-        market: z.enum(["US", "TW"]).optional(),
-        currency: z.enum(["USD", "TWD"]).optional(),
+        username: usernameSchema,
+        displayName: z.string().trim().min(1).max(48),
+        bio: z.string().max(200).optional(),
+        themeColor: z.string().regex(/^#[0-9a-fA-F]{6}$/).optional(),
+        cardStyle: z.enum(["bold", "minimal", "retro", "neon"]).optional(),
+        avatar: z.string().optional(), // data URL（可選）
       }))
       .mutation(async ({ ctx, input }) => {
-        const sym = normalizeSymbol(input.symbol);
-        const detected = detectMarket(sym);
-        await upsertHolding({
+        if (await isUsernameTaken(input.username, ctx.user.id)) {
+          throw new TRPCError({ code: "CONFLICT", message: "這個帳號名稱已被使用" });
+        }
+        let avatarUrl: string | undefined;
+        if (input.avatar) {
+          const saved = await saveDataUrl(input.avatar, { maxBytes: MAX_IMAGE_BYTES });
+          avatarUrl = saved.url;
+        }
+        await upsertProfile({
           userId: ctx.user.id,
-          id: input.id,
-          symbol: sym,
-          name: input.name,
-          shares: String(input.shares),
-          avgCost: String(input.avgCost),
-          sector: input.sector,
-          market: input.market || detected.market,
-          currency: input.currency || detected.currency,
+          username: input.username,
+          displayName: input.displayName,
+          bio: input.bio ?? null,
+          ...(input.themeColor ? { themeColor: input.themeColor } : {}),
+          ...(input.cardStyle ? { cardStyle: input.cardStyle } : {}),
+          ...(avatarUrl ? { avatarUrl } : {}),
         });
         return { success: true };
       }),
 
-    delete: protectedProcedure
-      .input(z.object({ id: z.number() }))
-      .mutation(async ({ ctx, input }) => {
-        await deleteHolding(input.id, ctx.user.id);
-        return { success: true };
-      }),
-
-    bulkImport: protectedProcedure
-      .input(z.array(z.object({
-        symbol: z.string().min(1),
-        name: z.string().default(""),
-        shares: z.number().positive(),
-        avgCost: z.number().positive(),
-        sector: z.string().default("Other"),
-        market: z.enum(["US", "TW"]).optional(),
-        currency: z.enum(["USD", "TWD"]).optional(),
-      })))
-      .mutation(async ({ ctx, input }) => {
-        let imported = 0;
-        let skipped = 0;
-        for (const row of input) {
-          try {
-            const sym = normalizeSymbol(row.symbol);
-            const detected = detectMarket(sym);
-            await upsertHolding({
-              userId: ctx.user.id,
-              symbol: sym,
-              name: row.name || sym,
-              shares: String(row.shares),
-              avgCost: String(row.avgCost),
-              sector: row.sector || "Other",
-              market: row.market || detected.market,
-              currency: row.currency || detected.currency,
-            });
-            imported++;
-          } catch {
-            skipped++;
-          }
-        }
-        return { success: true, imported, skipped };
-      }),
-  }),
-
-  // ─── Watchlist ───
-  watchlist: router({
-    list: protectedProcedure.query(async ({ ctx }) => {
-      let rows = await getWatchlist(ctx.user.id);
-      if (rows.length === 0) {
-        for (const w of DEFAULT_WATCHLIST) {
-          await addWatchlistItem({ userId: ctx.user.id, ...w });
-        }
-        rows = await getWatchlist(ctx.user.id);
-      }
-      return rows.map((r) => ({
-        ...r,
-        market: (r.market || "US") as "US" | "TW",
-        currency: (r.currency || "USD") as "USD" | "TWD",
-      }));
-    }),
-
-    add: protectedProcedure
-      .input(z.object({
-        symbol: z.string().min(1),
-        name: z.string().default(""),
-        sector: z.string().default("Other"),
-        market: z.enum(["US", "TW"]).optional(),
-        currency: z.enum(["USD", "TWD"]).optional(),
-      }))
-      .mutation(async ({ ctx, input }) => {
-        const sym = normalizeSymbol(input.symbol);
-        const detected = detectMarket(sym);
-        // Auto-lookup name and sector if not provided
-        let name = input.name || sym;
-        let sector = input.sector || "Other";
-        try {
-          const info = await lookupStock(sym);
-          if (info) {
-            name = input.name || info.name || sym;
-            sector = (input.sector && input.sector !== "Other") ? input.sector : (info.sector || "Other");
-          }
-        } catch (e) {
-          // Lookup failed, use defaults
-        }
-        await addWatchlistItem({
-          userId: ctx.user.id,
-          symbol: sym,
-          name,
-          sector,
-          market: input.market || detected.market,
-          currency: input.currency || detected.currency,
-        });
-        return { success: true };
-      }),
-
-    delete: protectedProcedure
-      .input(z.object({ id: z.number() }))
-      .mutation(async ({ ctx, input }) => {
-        await deleteWatchlistItem(input.id, ctx.user.id);
-        return { success: true };
-      }),
-  }),
-
-  // ─── Cash Flows ───
-  cashflow: router({
-    list: protectedProcedure.query(async ({ ctx }) => {
-      let rows = await getCashFlows(ctx.user.id);
-      if (rows.length === 0) {
-        for (const cf of DEFAULT_CASHFLOWS) {
-          await upsertCashFlow({ userId: ctx.user.id, ...cf });
-        }
-        rows = await getCashFlows(ctx.user.id);
-      }
-      return rows.map((r) => {
-        const inf = parseFloat(String(r.inflow));
-        const outf = parseFloat(String(r.outflow));
-        const isIncome = inf > 0;
+    // 看別人的 profile（只能透過已相遇的人 → 沒有搜尋入口）
+    get: protectedProcedure
+      .input(z.object({ userId: z.number() }))
+      .query(async ({ ctx, input }) => {
+        const p = await getProfileByUserId(input.userId);
+        if (!p) throw new TRPCError({ code: "NOT_FOUND" });
+        const [followers, following, following_, encountered, posts] = await Promise.all([
+          getFollowerCount(input.userId),
+          getFollowingCount(input.userId),
+          isFollowing(ctx.user.id, input.userId),
+          hasEncountered(ctx.user.id, input.userId),
+          getPostsByUser(input.userId, false),
+        ]);
         return {
-          id: r.id,
-          date: r.date,
-          type: isIncome ? "income" as const : "expense" as const,
-          amount: isIncome ? inf : outf,
-          category: r.category || "",
-          note: r.note || "",
+          userId: p.userId,
+          username: p.username,
+          displayName: p.displayName,
+          bio: p.bio,
+          avatarUrl: p.avatarUrl,
+          themeColor: p.themeColor,
+          cardStyle: p.cardStyle,
+          streakCount: p.streakCount,
+          followers,
+          following,
+          isFollowing: following_,
+          canFollow: encountered || following_, // 必須相遇過才能追蹤
+          activePosts: await assemblePosts(posts, ctx.user.id),
         };
-      });
-    }),
-
-    upsert: protectedProcedure
-      .input(z.object({
-        id: z.number().optional(),
-        date: z.string().min(1),
-        type: z.enum(["income", "expense"]),
-        amount: z.number().min(0),
-        category: z.string().optional(),
-        note: z.string().optional(),
-      }))
-      .mutation(async ({ ctx, input }) => {
-        await upsertCashFlow({
-          userId: ctx.user.id,
-          id: input.id,
-          date: input.date,
-          inflow: input.type === "income" ? String(input.amount) : "0",
-          outflow: input.type === "expense" ? String(input.amount) : "0",
-          category: input.category || null,
-          note: input.note,
-        });
-        return { success: true };
-      }),
-
-    delete: protectedProcedure
-      .input(z.object({ id: z.number() }))
-      .mutation(async ({ ctx, input }) => {
-        await deleteCashFlow(input.id, ctx.user.id);
-        return { success: true };
-      }),
-
-    bulkReplace: protectedProcedure
-      .input(z.array(z.object({
-        date: z.string(),
-        type: z.enum(["income", "expense"]),
-        amount: z.number(),
-        category: z.string().optional(),
-        note: z.string().optional(),
-      })))
-      .mutation(async ({ ctx, input }) => {
-        await bulkReplaceCashFlows(
-          ctx.user.id,
-          input.map((r) => ({
-            date: r.date,
-            inflow: r.type === "income" ? String(r.amount) : "0",
-            outflow: r.type === "expense" ? String(r.amount) : "0",
-            category: r.category,
-          }))
-        );
-        return { success: true };
-      }),
-
-    getBalance: protectedProcedure.query(async ({ ctx }) => {
-      const balance = await getCashBalance(ctx.user.id);
-      return { balance };
-    }),
-
-    setBalance: protectedProcedure
-      .input(z.object({ balance: z.number().min(0) }))
-      .mutation(async ({ ctx, input }) => {
-        await setCashBalance(ctx.user.id, input.balance);
-        return { success: true };
       }),
   }),
 
-  // ─── Price Alerts ───
-  priceAlert: router({
-    list: protectedProcedure.query(async ({ ctx }) => {
-      const rows = await getPriceAlerts(ctx.user.id);
-      return rows.map((r) => ({
-        id: r.id,
-        symbol: r.symbol,
-        alertType: r.alertType as "above" | "below",
-        targetPrice: parseFloat(String(r.targetPrice)),
-        note: r.note || "",
-        triggered: r.triggered,
-        triggeredAt: r.triggeredAt,
-        active: r.active,
-        createdAt: r.createdAt,
-      }));
-    }),
-
+  // ─── 貼文（限時圖片 / 10 秒影片） ───
+  post: router({
     create: protectedProcedure
       .input(z.object({
-        symbol: z.string().min(1),
-        alertType: z.enum(["above", "below"]),
-        targetPrice: z.number().positive(),
-        note: z.string().optional(),
+        media: z.string().min(1), // data URL
+        mediaType: z.enum(["image", "video"]),
+        caption: z.string().max(280).optional(),
+        lat: z.number(),
+        lng: z.number(),
+        durationSec: z.number().optional(), // 影片長度（前端量測）
       }))
       .mutation(async ({ ctx, input }) => {
-        await createPriceAlert({
+        if (!isValidCoord(input.lat, input.lng)) {
+          throw new TRPCError({ code: "BAD_REQUEST", message: "位置資訊無效" });
+        }
+        if (input.mediaType === "video" && input.durationSec !== undefined && input.durationSec > 10.5) {
+          throw new TRPCError({ code: "BAD_REQUEST", message: "影片不能超過 10 秒" });
+        }
+        const profile = await getProfileByUserId(ctx.user.id);
+        if (!profile) throw new TRPCError({ code: "PRECONDITION_FAILED", message: "請先建立個人介面" });
+
+        const maxBytes = input.mediaType === "video" ? MAX_VIDEO_BYTES : MAX_IMAGE_BYTES;
+        const saved = await saveDataUrl(input.media, { maxBytes });
+        const now = new Date();
+        const id = await createPost({
           userId: ctx.user.id,
-          symbol: normalizeSymbol(input.symbol),
-          alertType: input.alertType,
-          targetPrice: String(input.targetPrice),
-          note: input.note || null,
+          mediaType: saved.mediaType,
+          mediaUrl: saved.url,
+          caption: input.caption ?? null,
+          lat: input.lat,
+          lng: input.lng,
+          expiresAt: new Date(now.getTime() + POST_TTL_MS),
         });
+        await bumpStreak(ctx.user.id);
+        return { id, mediaUrl: saved.url };
+      }),
+
+    // 附近 3 公里動態（同時記錄相遇 → 解鎖追蹤）
+    nearby: protectedProcedure
+      .input(z.object({ lat: z.number(), lng: z.number() }))
+      .query(async ({ ctx, input }) => {
+        if (!isValidCoord(input.lat, input.lng)) {
+          throw new TRPCError({ code: "BAD_REQUEST", message: "位置資訊無效" });
+        }
+        const origin = { lat: input.lat, lng: input.lng };
+        const box = boundingBox(origin, NEARBY_RADIUS_KM);
+        const candidates = await getActivePostsInBox(box);
+        const within = candidates.filter((p) => distanceKm(origin, { lat: p.lat, lng: p.lng }) <= NEARBY_RADIUS_KM);
+        // 記錄相遇（看到附近某人的貼文後即可追蹤對方）
+        await recordEncounters(ctx.user.id, within.map((p) => p.userId));
+        return assemblePosts(within, ctx.user.id, origin);
+      }),
+
+    // 追蹤中的動態（永久連結，不受 3 公里限制）
+    following: protectedProcedure.query(async ({ ctx }) => {
+      const ids = await getFollowingIds(ctx.user.id);
+      const rows = await getActivePostsByAuthors(ids);
+      return assemblePosts(rows, ctx.user.id);
+    }),
+
+    // 我的貼文（含已保存的封存）
+    mine: protectedProcedure.query(async ({ ctx }) => {
+      const rows = await getPostsByUser(ctx.user.id, true);
+      return assemblePosts(rows, ctx.user.id);
+    }),
+
+    react: protectedProcedure
+      .input(z.object({ postId: z.number(), emoji: z.string() }))
+      .mutation(async ({ ctx, input }) => {
+        if (!ALLOWED_EMOJI.includes(input.emoji)) {
+          throw new TRPCError({ code: "BAD_REQUEST", message: "不支援的表情" });
+        }
+        await setReaction(input.postId, ctx.user.id, input.emoji);
+        return { success: true };
+      }),
+
+    unreact: protectedProcedure
+      .input(z.object({ postId: z.number() }))
+      .mutation(async ({ ctx, input }) => {
+        await removeReaction(input.postId, ctx.user.id);
+        return { success: true };
+      }),
+
+    save: protectedProcedure
+      .input(z.object({ postId: z.number(), saved: z.boolean() }))
+      .mutation(async ({ ctx, input }) => {
+        const post = await getPostById(input.postId);
+        if (!post || post.userId !== ctx.user.id) throw new TRPCError({ code: "FORBIDDEN" });
+        await setPostSaved(input.postId, ctx.user.id, input.saved);
         return { success: true };
       }),
 
     delete: protectedProcedure
-      .input(z.object({ id: z.number() }))
+      .input(z.object({ postId: z.number() }))
       .mutation(async ({ ctx, input }) => {
-        await deletePriceAlert(input.id, ctx.user.id);
+        await deletePost(input.postId, ctx.user.id);
         return { success: true };
       }),
-
-    toggle: protectedProcedure
-      .input(z.object({ id: z.number(), active: z.boolean() }))
-      .mutation(async ({ ctx, input }) => {
-        await togglePriceAlert(input.id, ctx.user.id, input.active);
-        return { success: true };
-      }),
-
-    // Manual check: fetch current prices and fire notifications for triggered alerts
-    checkAndNotify: protectedProcedure.mutation(async () => {
-      const alerts = await getActivePriceAlerts();
-      if (alerts.length === 0) return { triggered: 0 };
-
-      // Group by symbol to batch fetch
-      const symbols = Array.from(new Set(alerts.map((a) => a.symbol)));
-      let triggered = 0;
-      try {
-        const quotes = await batchGetQuotes(symbols);
-        const priceMap: Record<string, number> = {};
-        quotes.forEach((q) => { priceMap[q.symbol] = q.price; });
-
-        for (const alert of alerts) {
-          const price = priceMap[alert.symbol];
-          if (price === undefined || price === 0) continue;
-          const target = parseFloat(String(alert.targetPrice));
-          const hit = alert.alertType === "above" ? price >= target : price <= target;
-          if (hit) {
-            await markAlertTriggered(alert.id);
-            const direction = alert.alertType === "above" ? "高於" : "低於";
-            console.log(`[PriceAlert] 觸發: ${alert.symbol} $${price.toFixed(2)} ${direction} $${target.toFixed(2)}`);
-            triggered++;
-          }
-        }
-      } catch (e) {
-        console.warn("[PriceAlert] check failed:", e);
-      }
-      return { triggered };
-    }),
   }),
 
-  // ─── Trailing Stops ───
-  trailingStop: router({
-    list: protectedProcedure.query(async ({ ctx }) => {
-      const rows = await getTrailingStops(ctx.user.id);
-      return rows.map((r) => ({
-        symbol: r.symbol,
-        trailPct: parseFloat(String(r.trailPct)),
-        takeProfitPrice: r.takeProfitPrice ? parseFloat(String(r.takeProfitPrice)) : null,
-      }));
-    }),
-
-    set: protectedProcedure
-      .input(z.object({
-        symbol: z.string().min(1),
-        trailPct: z.number().min(1).max(50),
-        takeProfitPrice: z.number().positive().nullable().optional(),
-      }))
+  // ─── 追蹤（不可透過搜尋，僅能對相遇過的人追蹤） ───
+  follow: router({
+    follow: protectedProcedure
+      .input(z.object({ userId: z.number() }))
       .mutation(async ({ ctx, input }) => {
-        await upsertTrailingStop({
-          userId: ctx.user.id,
-          symbol: normalizeSymbol(input.symbol),
-          trailPct: String(input.trailPct),
-          ...(input.takeProfitPrice !== undefined ? { takeProfitPrice: input.takeProfitPrice != null ? String(input.takeProfitPrice) : null } : {}),
-        });
+        if (input.userId === ctx.user.id) {
+          throw new TRPCError({ code: "BAD_REQUEST", message: "不能追蹤自己" });
+        }
+        const encountered = await hasEncountered(ctx.user.id, input.userId);
+        if (!encountered) {
+          throw new TRPCError({ code: "FORBIDDEN", message: "要先在附近看到對方的分享才能追蹤" });
+        }
+        await addFollow(ctx.user.id, input.userId);
+        return { success: true };
+      }),
+
+    unfollow: protectedProcedure
+      .input(z.object({ userId: z.number() }))
+      .mutation(async ({ ctx, input }) => {
+        await removeFollow(ctx.user.id, input.userId);
         return { success: true };
       }),
   }),

@@ -1,2 +1,0 @@
-ALTER TABLE `holdings` ADD CONSTRAINT `holdings_user_symbol_idx` UNIQUE(`userId`,`symbol`);--> statement-breakpoint
-ALTER TABLE `watchlist` ADD CONSTRAINT `watchlist_user_symbol_idx` UNIQUE(`userId`,`symbol`);

@@ -202,3 +202,76 @@
     }
   }
 }
+/* ════════════════════════════════════════════════════
+   Blip — 美式社群風格主題覆寫（bold / vibrant）
+   ════════════════════════════════════════════════════ */
+:root {
+  --radius: 1.1rem;
+  --background: #fafafa;
+  --foreground: #0a0a0b;
+  --card: #ffffff;
+  --card-foreground: #0a0a0b;
+  --popover: #ffffff;
+  --popover-foreground: #0a0a0b;
+  --primary: #ff3d5e;
+  --primary-foreground: #ffffff;
+  --secondary: #f2f2f5;
+  --secondary-foreground: #0a0a0b;
+  --muted: #f2f2f5;
+  --muted-foreground: #6b6b76;
+  --accent: #7c5cfc;
+  --accent-foreground: #ffffff;
+  --destructive: #ef4444;
+  --destructive-foreground: #ffffff;
+  --border: #e7e7ec;
+  --input: #e7e7ec;
+  --ring: #ff3d5e;
+}
+
+.dark {
+  --background: #0a0a0f;
+  --foreground: #f6f6f8;
+  --card: #15151d;
+  --card-foreground: #f6f6f8;
+  --popover: #15151d;
+  --popover-foreground: #f6f6f8;
+  --primary: #ff3d5e;
+  --primary-foreground: #ffffff;
+  --secondary: #1d1d27;
+  --secondary-foreground: #f6f6f8;
+  --muted: #1d1d27;
+  --muted-foreground: #9a9aa6;
+  --accent: #8b6cff;
+  --accent-foreground: #ffffff;
+  --destructive: #f05252;
+  --destructive-foreground: #ffffff;
+  --border: #26262f;
+  --input: #26262f;
+  --ring: #ff3d5e;
+}
+
+@layer base {
+  body {
+    font-family: 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif;
+    letter-spacing: -0.01em;
+  }
+  h1, h2, h3, .display {
+    letter-spacing: -0.03em;
+    font-weight: 800;
+  }
+}
+
+@layer utilities {
+  /* 美式漸層霓虹 */
+  .blip-gradient {
+    background-image: linear-gradient(135deg, #ff3d5e 0%, #ff7a3d 45%, #8b6cff 100%);
+  }
+  .blip-gradient-text {
+    background-image: linear-gradient(135deg, #ff3d5e 0%, #8b6cff 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+  .no-scrollbar::-webkit-scrollbar { display: none; }
+  .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+}
